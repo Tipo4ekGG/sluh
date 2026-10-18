@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Слушатель</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one column, a live transcript tape; questions lift out of the tape with the answer attached under them */
+:root{
+  --bg:#f3f4f2; --surface:#ffffff; --fg:#1b1f1d; --muted:#6b736f; --line:#dde1de;
+  --accent:#0f7a5c; --accent-ink:#ffffff; --q:#fff6dc; --q-edge:#d9a514; --rec:#d23b2e;
+  --font-body:"Golos Text",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#121514; --surface:#1b1f1d; --fg:#e7ebe9; --muted:#8f9894; --line:#2c3230;
+  --accent:#3cc596; --accent-ink:#06261b; --q:#2a2512; --q-edge:#d9a514; --rec:#ff6b5e; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#121514; --surface:#1b1f1d; --fg:#e7ebe9; --muted:#8f9894; --line:#2c3230;
+  --accent:#3cc596; --accent-ink:#06261b; --q:#2a2512; --q-edge:#d9a514; --rec:#ff6b5e; color-scheme:dark}
+
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{background:var(--bg);color:var(--fg);font:15px/1.5 var(--font-body);
+  padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+.wrap{max-width:720px;margin:0 auto;height:100%;display:flex;flex-direction:column;
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+
+header{display:flex;align-items:center;gap:12px;padding-block:16px 12px}
+h1{font-size:20px;font-weight:700;margin:0;letter-spacing:-.01em}
+.status{display:flex;align-items:center;gap:8px;font:500 12px var(--font-mono);color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-left:auto}
+.dot{width:10px;height:10px;border-radius:50%;background:var(--line)}
+.on .dot{background:var(--rec);animation:pulse 1.4s ease-in-out infinite}
+@keyframes pulse{50%{opacity:.35}}
+@media (prefers-reduced-motion:reduce){.on .dot{animation:none}}
+
+.controls{display:flex;gap:8px;flex-wrap:wrap;padding-bottom:12px}
+button,select,input{font:inherit;color:inherit}
+.btn{border:1px solid var(--line);background:var(--surface);border-radius:10px;padding:10px 14px;cursor:pointer;font-weight:500}
+.btn:focus-visible,select:focus-visible,input:focus-visible,.line:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.btn.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent);flex:1 1 180px;font-weight:600}
+.on .btn.primary{background:var(--rec);border-color:var(--rec);color:#fff}
+
+details{border:1px solid var(--line);border-radius:10px;background:var(--surface);margin-bottom:12px}
+summary{padding:10px 14px;cursor:pointer;font-weight:500}
+.settings{display:grid;gap:12px;padding:0 14px 14px}
+.settings label{display:grid;gap:4px;font-size:13px;color:var(--muted)}
+.settings select,.settings input{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:9px 10px;width:100%;min-width:0}
+.hint{font-size:12.5px;color:var(--muted);margin:0}
+
+.tape{flex:1;overflow-y:auto;border-top:1px solid var(--line);padding-block:12px 24px;display:flex;flex-direction:column;gap:6px;min-height:0}
+.empty{color:var(--muted);margin:auto 0;text-align:center;padding:24px 8px}
+.line{display:grid;grid-template-columns:52px 1fr;gap:10px;padding:6px 8px;border-radius:8px;cursor:pointer}
+.line:hover{background:var(--surface)}
+.t{font:12px/1.9 var(--font-mono);color:var(--muted);font-variant-numeric:tabular-nums}
+.txt{min-width:0;overflow-wrap:anywhere}
+.line.q{background:var(--q);border-left:3px solid var(--q-edge);padding-left:7px}
+.answer{margin:2px 0 8px 62px;padding:10px 12px;background:var(--surface);border:1px solid var(--line);border-radius:10px;white-space:pre-wrap;overflow-wrap:anywhere}
+.answer .who{display:block;font:500 11px var(--font-mono);color:var(--accent);text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px}
+.answer.wait{color:var(--muted)}
+.answer.err{color:var(--rec)}
+.interim{color:var(--muted);font-style:italic;padding:4px 8px 4px 70px;min-height:1.5em}
+.note{font-size:13px;color:var(--rec);padding-bottom:8px}
+@media (max-width:420px){.line{grid-template-columns:44px 1fr}.answer{margin-left:0}.interim{padding-left:8px}}
+</style>
+</head>
+<body>
+<div class="wrap" id="app">
+  <header>
+    <h1>Слушатель</h1>
+    <div class="status"><span class="dot"></span><span id="statusText">пауза</span></div>
+  </header>
+
+  <div class="controls">
+    <button class="btn primary" id="toggle">Начать слушать</button>
+    <button class="btn" id="clear">Очистить</button>
+    <button class="btn" id="copy">Скопировать всё</button>
+  </div>
+
+  <details id="settingsBox">
+    <summary>Настройки</summary>
+    <div class="settings">
+      <label>Язык речи
+        <select id="lang">
+          <option value="ru-RU">Русский</option>
+          <option value="en-US">Английский</option>
+          <option value="ar-SA">Арабский</option>
+        </select>
+      </label>
+      <label>На что отвечать
+        <select id="mode">
+          <option value="questions">Только на вопросы</option>
+          <option value="all">На каждую фразу</option>
+          <option value="manual">Только по нажатию на строку</option>
+        </select>
+      </label>
+      <label>Ключ Claude API
+        <input id="key" type="password" autocomplete="off" placeholder="sk-ant-…">
+      </label>
+      <p class="hint">Ключ хранится только в этом браузере и отправляется только на api.anthropic.com. Без ключа страница всё равно ведёт расшифровку и подсвечивает вопросы. Нажатие на любую строку отправляет её как вопрос.</p>
+    </div>
+  </details>
+
+  <div class="note" id="note" hidden></div>
+  <div class="tape" id="tape" aria-live="polite">
+    <p class="empty" id="empty">Нажмите «Начать слушать». Расшифровка появится здесь, вопросы подсветятся, ответы встанут под ними.</p>
+  </div>
+  <div class="interim" id="interim"></div>
+</div>
+
+<script>
+(function(){
+  const $ = id => document.getElementById(id);
+  const app=$("app"), tape=$("tape"), interimEl=$("interim"), note=$("note"), emptyEl=$("empty");
+  const store = {
+    get(k,d){try{const v=localStorage.getItem("sl_"+k);return v===null?d:v}catch(e){return d}},
+    set(k,v){try{localStorage.setItem("sl_"+k,v)}catch(e){}}
+  };
+  $("lang").value = store.get("lang","ru-RU");
+  $("mode").value = store.get("mode","questions");
+  $("key").value = store.get("key","");
+  if(!$("key").value) $("settingsBox").open = true;
+  ["lang","mode","key"].forEach(id=>$(id).addEventListener("change",()=>{store.set(id,$(id).value); if(id==="lang"&&listening){rec.stop();}}));
+
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  function showNote(msg){note.textContent=msg;note.hidden=!msg;}
+  if(!SR){showNote("Этот браузер не умеет распознавать речь. Откройте страницу в Chrome (на компьютере или Android) или в Safari на iPhone.");$("toggle").disabled=true;}
+
+  const transcript=[]; // {time,text}
+  let listening=false, rec=null;
+
+  const Q_START=new Set(("что чего чему чем как какой какая какое какие каков какова почему зачем когда где куда откуда кто кого кому сколько чей чья чьё чьи ли можно разве неужели правда объясните объясни расскажите расскажи назовите назови скажите скажи "+
+    "what why how when where who whom whose which is are was were do does did can could should would will "+
+    "هل ما ماذا لماذا كيف متى أين اين من كم أي").split(" "));
+  function isQuestion(s){
+    const t=s.trim().toLowerCase();
+    if(!t) return false;
+    if(/[?؟]\s*$/.test(t)) return true;
+    const first=t.split(/\s+/)[0].replace(/[^\p{L}]/gu,"");
+    if(Q_START.has(first)) return true;
+    if(/(^|\s)ли(\s|$)/.test(t)) return true;
+    if(/(не подскажете|не скажете|как думаете|как вы думаете|что такое|в чём разница|в чем разница)/.test(t)) return true;
+    return false;
+  }
+
+  function clock(){const d=new Date();return d.toTimeString().slice(0,5);}
+
+  function addLine(text){
+    emptyEl.hidden=true;
+    const item={time:clock(),text};
+    transcript.push(item);
+    const row=document.createElement("div");
+    row.className="line"; row.tabIndex=0; row.title="Нажмите, чтобы получить ответ";
+    const t=document.createElement("span"); t.className="t"; t.textContent=item.time;
+    const x=document.createElement("span"); x.className="txt"; x.textContent=text;
+    row.append(t,x);
+    tape.insertBefore(row,null);
+    const ask=()=>{ if(!row.dataset.asked) answer(row,text); };
+    row.addEventListener("click",ask);
+    row.addEventListener("keydown",e=>{if(e.key==="Enter")ask();});
+    const mode=$("mode").value;
+    const q=isQuestion(text);
+    if(q) row.classList.add("q");
+    if(mode==="all" || (mode==="questions" && q)) answer(row,text);
+    scrollDown();
+  }
+
+  function scrollDown(){tape.scrollTop=tape.scrollHeight;}
+
+  async function answer(row,question){
+    row.dataset.asked="1"; row.classList.add("q");
+    const box=document.createElement("div"); box.className="answer wait";
+    box.innerHTML='<span class="who">ответ</span>';
+    const body=document.createElement("span"); body.textContent="Думаю…"; box.append(body);
+    row.after(box); scrollDown();
+    const key=$("key").value.trim();
+    if(!key){box.className="answer err";body.textContent="Добавьте ключ Claude API в настройках, чтобы получать ответы.";return;}
+    const context=transcript.map(l=>l.text).join("\n").slice(-4000);
+    const prompt="Ты слушаешь живую речь через диктофон и подсказываешь ответы. Ниже расшифровка последних минут; в ней могут быть ошибки распознавания.\n\n<расшифровка>\n"+context+"\n</расшифровка>\n\nПоследняя реплика: «"+question+"».\nЕсли в ней есть вопрос, дай на него точный ответ в 1–4 предложениях. Если это не вопрос, дай короткий полезный комментарий в одном предложении. Отвечай на языке реплики, без вступлений.";
+    try{
+      const r=await fetch("https://api.anthropic.com/v1/messages",{
+        method:"POST",
+        headers:{"content-type":"application/json","x-api-key":key,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
+        body:JSON.stringify({model:"claude-haiku-5-5",max_tokens:400,messages:[{role:"user",content:prompt}]})
+      });
+      const data=await r.json().catch(()=>({}));
+      if(!r.ok){
+        const m=data&&data.error&&data.error.message||("код "+r.status);
+        box.className="answer err";
+        body.textContent=r.status===401?"Ключ не подошёл. Проверьте его в настройках.":"Ошибка API: "+m;
+        return;
+      }
+      box.className="answer";
+      body.textContent=(data.content||[]).filter(c=>c.type==="text").map(c=>c.text).join("\n").trim()||"(пустой ответ)";
+    }catch(e){
+      box.className="answer err"; body.textContent="Нет связи с сервером. Нажмите на строку ещё раз, чтобы повторить."; delete row.dataset.asked;
+    }
+    scrollDown();
+  }
+
+  function setState(on){
+    listening=on; app.classList.toggle("on",on);
+    $("statusText").textContent=on?"слушаю":"пауза";
+    $("toggle").textContent=on?"Остановить":"Начать слушать";
+  }
+
+  function start(){
+    rec=new SR();
+    rec.lang=$("lang").value; rec.continuous=true; rec.interimResults=true;
+    rec.onresult=e=>{
+      let interim="";
+      for(let i=e.resultIndex;i<e.results.length;i++){
+        const r=e.results[i];
+        if(r.isFinal){const s=r[0].transcript.trim(); if(s) addLine(s);}
+        else interim+=r[0].transcript;
+      }
+      interimEl.textContent=interim;
+    };
+    rec.onerror=e=>{
+      if(e.error==="not-allowed"||e.error==="service-not-allowed"){showNote("Нет доступа к микрофону. Разрешите его в настройках браузера для этой страницы.");setState(false);}
+      else if(e.error==="network"){showNote("Распознавание речи требует интернета.");}
+    };
+    rec.onend=()=>{ interimEl.textContent=""; if(listening){ try{rec.start();}catch(_){setTimeout(()=>listening&&start(),300);} } };
+    try{rec.start(); showNote(""); setState(true);}catch(e){showNote("Не удалось включить микрофон.");}
+  }
+
+  $("toggle").onclick=()=>{ if(listening){setState(false); rec&&rec.stop();} else start(); };
+  $("clear").onclick=()=>{ transcript.length=0; tape.querySelectorAll(".line,.answer").forEach(n=>n.remove()); emptyEl.hidden=false; };
+  $("copy").onclick=async()=>{
+    const out=[...tape.querySelectorAll(".line,.answer")].map(n=>n.classList.contains("answer")?"  → "+n.querySelector("span:last-child").textContent:n.textContent.replace(/^(\d\d:\d\d)/,"[$1] ")).join("\n");
+    try{await navigator.clipboard.writeText(out); $("copy").textContent="Скопировано";}catch(e){$("copy").textContent="Не вышло";}
+    setTimeout(()=>$("copy").textContent="Скопировать всё",1500);
+  };
+  document.addEventListener("visibilitychange",()=>{ if(document.visibilityState==="visible"&&listening&&rec){ try{rec.start();}catch(_){} } });
+})();
+</script>
+</body>
+</html>
