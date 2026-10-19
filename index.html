@@ -158,6 +158,14 @@ summary{padding:10px 14px;cursor:pointer;font-weight:500}
   const Q_START=new Set(("что чего чему чем как какой какая какое какие каков какова почему зачем когда где куда откуда кто кого кому сколько чей чья чьё чьи ли можно разве неужели правда объясните объясни расскажите расскажи назовите назови скажите скажи "+
     "what why how when where who whom whose which is are was were do does did can could should would will "+
     "هل ما ماذا لماذا كيف متى أين اين من كم أي").split(" "));
+  // Мягкий фильтр: признак вопроса в любом месте строки. Окончательно решает модель.
+  function maybeQuestion(s){
+    const t=s.toLowerCase();
+    if(/[?؟]/.test(t)) return true;
+    const words=t.split(/\s+/).map(w=>w.replace(/[^\p{L}]/gu,""));
+    if(words.some(w=>Q_START.has(w))) return true;
+    return /(не подскажете|не скажете|как думаете|что такое|в ч[её]м разница|интересно)/.test(t);
+  }
   function isQuestion(s){
     const t=s.trim().toLowerCase();
     if(!t) return false;
@@ -187,24 +195,29 @@ summary{padding:10px 14px;cursor:pointer;font-weight:500}
     const mode=$("mode").value;
     const q=isQuestion(text);
     if(q) row.classList.add("q");
-    if(mode==="all" || (mode==="questions" && q)) answer(row,text);
+    if(mode==="all") answer(row,text,false);
+    else if(mode==="questions" && (q || maybeQuestion(text))) answer(row,text,true);
     scrollDown();
   }
 
   function scrollDown(){tape.scrollTop=tape.scrollHeight;}
 
-  async function answer(row,question){
-    row.dataset.asked="1"; row.classList.add("q");
+  async function answer(row,question,gated){
+    row.dataset.asked="1"; if(!gated) row.classList.add("q");
     const box=document.createElement("div"); box.className="answer wait";
     box.innerHTML='<span class="who">ответ</span>';
-    const body=document.createElement("span"); body.textContent="Думаю…"; box.append(body);
+    const body=document.createElement("span"); body.textContent=gated?"Проверяю, есть ли вопрос…":"Думаю…"; box.append(body);
     row.after(box); scrollDown();
     const key=$("key").value.trim();
     if(!key){box.className="answer err";body.textContent="Добавьте ключ Claude API в настройках, чтобы получать ответы.";return;}
     const context=transcript.map(l=>l.text).join("\n").slice(-4000);
-    const prompt="Ты слушаешь живую речь через диктофон и подсказываешь ответы. Ниже расшифровка последних минут; в ней могут быть ошибки распознавания.\n\n<расшифровка>\n"+context+"\n</расшифровка>\n\nПоследняя реплика: «"+question+"».\nЕсли в ней есть вопрос, дай на него точный ответ в 1–4 предложениях. Если это не вопрос, дай короткий полезный комментарий в одном предложении. Отвечай на языке реплики, без вступлений.";
+    const prompt="Ты слушаешь живую речь через диктофон и подсказываешь ответы. Ниже расшифровка последних минут; в ней могут быть ошибки распознавания.\n\n<расшифровка>\n"+context+"\n</расшифровка>\n\nПоследняя реплика: «"+question+"».\n"+(gated
+      ?"Распознавание не ставит знаков препинания и может склеить несколько фраз в одну, поэтому вопрос может стоять в середине реплики. Если в реплике есть настоящий вопрос (прямой или косвенный, например «интересно, кто…», «объясните…»), дай на него точный ответ в 1–4 предложениях. Если вопросов несколько, ответь на каждый. Если вопроса нет (например, «когда я был студентом…», «я не знаю, где он»), ответь ровно одним символом: —"
+      :"Если в ней есть вопрос, дай на него точный ответ в 1–4 предложениях. Если это не вопрос, дай короткий полезный комментарий в одном предложении.")+" Отвечай на языке реплики, без вступлений.";
     try{
       const text=await callModel(prompt);
+      if(gated && /^[\s—–\-.]*$/.test(text||"")){ box.remove(); delete row.dataset.asked; return; }
+      row.classList.add("q");
       box.className="answer";
       body.textContent=text||"(пустой ответ)";
     }catch(e){
