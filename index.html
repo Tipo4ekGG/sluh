@@ -139,7 +139,10 @@ summary{padding:10px 14px;cursor:pointer;font-weight:500}
   $("lang").value = store.get("lang","ru-RU");
   $("mode").value = store.get("mode","questions");
   $("key").value = store.get("key","");
-  $("base").value = store.get("base","https://freecodex.fun/v1");
+  const PROXY="https://btvmezpdhhhmxraqirsc.supabase.co/functions/v1/sluh-proxy/v1";
+  let savedBase=store.get("base",PROXY);
+  if(/^https:\/\/freecodex\.fun/i.test(savedBase)){savedBase=PROXY;store.set("base",PROXY);}
+  $("base").value = savedBase;
   $("fmt").value = store.get("fmt","auto");
   $("model").value = store.get("model","");
   if(!$("key").value || !$("model").value) $("settingsBox").open = true;
