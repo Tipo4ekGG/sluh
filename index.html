@@ -152,7 +152,7 @@ summary{padding:10px 14px;cursor:pointer;font-weight:500}
   function showNote(msg){note.textContent=msg;note.hidden=!msg;}
   if(!SR){showNote("Этот браузер не умеет распознавать речь. Откройте страницу в Chrome (на компьютере или Android) или в Safari на iPhone.");$("toggle").disabled=true;}
 
-  const transcript=[]; // {time,text}
+  const transcript=[]; // {time,text,row,status}
   let listening=false, rec=null;
 
   const Q_START=new Set(("что чего чему чем как какой какая какое какие каков какова почему зачем когда где куда откуда кто кого кому сколько чей чья чьё чьи ли можно разве неужели правда объясните объясни расскажите расскажи назовите назови скажите скажи "+
@@ -179,49 +179,90 @@ summary{padding:10px 14px;cursor:pointer;font-weight:500}
 
   function clock(){const d=new Date();return d.toTimeString().slice(0,5);}
 
+  // Строки копятся, пока человек говорит. После паузы весь накопленный кусок
+  // оценивается целиком: так склеиваются разорванные вопросы и варианты ответа.
+  const PAUSE_MS=2200;
+  let pending=[], flushTimer=null, answeredLog=[];
+
+  function hasOptions(s){
+    const t=" "+s.toLowerCase()+" ";
+    if(/(вариант|выбер|какой из|какая из|какое из|какие из|верно|неверно|правильн| или |первое|второе|третье|четв[её]ртое|option|choose|true|false| or | أو | أم )/.test(t)) return true;
+    return /\s[аa][\s).]/.test(t) && /\s[бbв][\s).]/.test(t);
+  }
+
   function addLine(text){
     emptyEl.hidden=true;
-    const item={time:clock(),text};
-    transcript.push(item);
     const row=document.createElement("div");
     row.className="line"; row.tabIndex=0; row.title="Нажмите, чтобы получить ответ";
+    const item={time:clock(),text,row,status:null};
+    transcript.push(item); pending.push(item);
     const t=document.createElement("span"); t.className="t"; t.textContent=item.time;
     const x=document.createElement("span"); x.className="txt"; x.textContent=text;
     row.append(t,x);
-    tape.insertBefore(row,null);
-    const ask=()=>{ if(!row.dataset.asked) answer(row,text); };
+    tape.append(row);
+    const ask=()=>{ if(!row.dataset.asked) answer([item],"manual"); };
     row.addEventListener("click",ask);
     row.addEventListener("keydown",e=>{if(e.key==="Enter")ask();});
-    const mode=$("mode").value;
-    const q=isQuestion(text);
-    if(q) row.classList.add("q");
-    if(mode==="all") answer(row,text,false);
-    else if(mode==="questions" && (q || maybeQuestion(text))) answer(row,text,true);
+    if(isQuestion(text)) row.classList.add("q");
+    schedule();
     scrollDown();
+  }
+
+  function schedule(){ clearTimeout(flushTimer); flushTimer=setTimeout(flush,PAUSE_MS); }
+
+  function flush(){
+    clearTimeout(flushTimer); flushTimer=null;
+    if(!pending.length) return;
+    const items=pending.splice(0);
+    const mode=$("mode").value;
+    if(mode==="manual") return;
+    const own=items.map(i=>i.text).join(" ");
+    const looks=maybeQuestion(own)||hasOptions(own);
+    const idx=transcript.indexOf(items[0]);
+    const prev=idx>0?transcript[idx-1]:null;
+    let group=items;
+    if(prev && (prev.status==="incomplete" || (prev.status==="rejected" && looks))) group=[prev,...items];
+    if(mode==="all" || looks || (prev && prev.status==="incomplete")) answer(group, mode==="all"?"all":"auto");
   }
 
   function scrollDown(){tape.scrollTop=tape.scrollHeight;}
 
-  async function answer(row,question,gated){
-    row.dataset.asked="1"; if(!gated) row.classList.add("q");
+  async function answer(group,kind){
+    const last=group[group.length-1];
+    group.forEach(i=>i.row.dataset.asked="1");
+    if(kind!=="auto") group.forEach(i=>i.row.classList.add("q"));
     const box=document.createElement("div"); box.className="answer wait";
     box.innerHTML='<span class="who">ответ</span>';
-    const body=document.createElement("span"); body.textContent=gated?"Проверяю, есть ли вопрос…":"Думаю…"; box.append(body);
-    row.after(box); scrollDown();
+    const body=document.createElement("span"); body.textContent=kind==="auto"?"Проверяю, есть ли вопрос…":"Думаю…"; box.append(body);
+    let anchor=last.row;
+    while(anchor.nextElementSibling && anchor.nextElementSibling.classList.contains("answer")) anchor=anchor.nextElementSibling;
+    anchor.after(box); scrollDown();
+    const release=st=>group.forEach(i=>{i.status=st; delete i.row.dataset.asked;});
     const key=$("key").value.trim();
-    if(!key){box.className="answer err";body.textContent="Добавьте ключ Claude API в настройках, чтобы получать ответы.";return;}
+    if(!key){box.className="answer err";body.textContent="Добавьте ключ API в настройках, чтобы получать ответы.";release(null);return;}
+    const fragment=group.map(i=>i.text).join(" ");
     const context=transcript.map(l=>l.text).join("\n").slice(-4000);
-    const prompt="Ты слушаешь живую речь через диктофон и подсказываешь ответы. Ниже расшифровка последних минут; в ней могут быть ошибки распознавания.\n\n<расшифровка>\n"+context+"\n</расшифровка>\n\nПоследняя реплика: «"+question+"».\n"+(gated
-      ?"Распознавание не ставит знаков препинания и может склеить несколько фраз в одну, поэтому вопрос может стоять в середине реплики. Если в реплике есть настоящий вопрос (прямой или косвенный, например «интересно, кто…», «объясните…»), дай на него точный ответ в 1–4 предложениях. Если вопросов несколько, ответь на каждый. Если вопроса нет (например, «когда я был студентом…», «я не знаю, где он»), ответь ровно одним символом: —"
-      :"Если в ней есть вопрос, дай на него точный ответ в 1–4 предложениях. Если это не вопрос, дай короткий полезный комментарий в одном предложении.")+" Отвечай на языке реплики, без вступлений.";
+    const done=answeredLog.length?"<уже_отвечено>\n"+answeredLog.join("\n")+"\n</уже_отвечено>\n\n":"";
+    const common="Ты слушаешь живую речь (лекцию, разговор, устный тест) через диктофон и подсказываешь ответы. Распознавание не ставит знаков препинания, может ошибаться в словах и резать фразы в случайных местах: начало вопроса может оказаться в одной строке, а продолжение в следующей.\n\n<расшифровка>\n"+context+"\n</расшифровка>\n\n"+done;
+    const rules="- Если в нём есть вопрос (прямой, косвенный или задание вроде «объясните…», «назовите…»), ответь на него точно, в 1–4 предложениях. Если начало вопроса было в предыдущих строках расшифровки, склей их.\n- Если это вопрос с вариантами ответа (а/б/в, первый/второй, «X или Y», «верно или неверно»), начни с правильного варианта, например «Ответ: б) Париж», и добавь одно предложение, почему.\n- Если фрагмент содержит варианты ответа или уточнение к вопросу, который прозвучал раньше, ответь на весь вопрос целиком с учётом вариантов, даже если на него уже отвечали без них.\n";
+    let prompt;
+    if(kind==="manual"){
+      prompt=common+"Пользователь сам отметил строку: «"+fragment+"». Вопрос может начинаться в предыдущей строке расшифровки или продолжаться в следующей.\n\nПравила:\n"+rules+"- Если вопроса нет, дай короткий полезный комментарий в одном предложении.\nОтвечай на языке фрагмента, без вступлений.";
+    }else if(kind==="all"){
+      prompt=common+"Новый фрагмент речи: «"+fragment+"».\n\nПравила:\n"+rules+"- Если вопроса нет, дай короткий полезный комментарий в одном предложении.\nОтвечай на языке фрагмента, без вступлений.";
+    }else{
+      prompt=common+"Новый фрагмент речи: «"+fragment+"».\n\nПравила:\n"+rules+"- Если вопрос явно оборван на полуслове и его продолжение ещё не прозвучало, ответь ровно одним символом: …\n- Если вопроса нет (например, «когда я был студентом…», «я не знаю, где он») или на него уже ответили и ничего нового не прозвучало, ответь ровно одним символом: —\nОтвечай на языке фрагмента, без вступлений.";
+    }
     try{
-      const text=await callModel(prompt);
-      if(gated && /^[\s—–\-.]*$/.test(text||"")){ box.remove(); delete row.dataset.asked; return; }
-      row.classList.add("q");
+      const text=(await callModel(prompt)||"").trim();
+      if(kind==="auto" && /^(…|\.{3})$/.test(text)){ box.remove(); release("incomplete"); return; }
+      if(kind==="auto" && /^[\s—–\-.]*$/.test(text)){ box.remove(); release("rejected"); return; }
+      group.forEach(i=>{i.status="answered"; i.row.classList.add("q");});
       box.className="answer";
       body.textContent=text||"(пустой ответ)";
+      answeredLog.push(fragment.slice(0,200)); if(answeredLog.length>6) answeredLog.shift();
     }catch(e){
-      box.className="answer err"; body.textContent=e.message; delete row.dataset.asked;
+      box.className="answer err"; body.textContent=e.message; release(null);
     }
     scrollDown();
   }
@@ -308,6 +349,7 @@ summary{padding:10px 14px;cursor:pointer;font-weight:500}
         else interim+=r[0].transcript;
       }
       interimEl.textContent=interim;
+      if(interim.trim() && pending.length) schedule();
     };
     rec.onerror=e=>{
       if(e.error==="not-allowed"||e.error==="service-not-allowed"){showNote("Нет доступа к микрофону. Разрешите его в настройках браузера для этой страницы.");setState(false);}
@@ -317,8 +359,8 @@ summary{padding:10px 14px;cursor:pointer;font-weight:500}
     try{rec.start(); showNote(""); setState(true);}catch(e){showNote("Не удалось включить микрофон.");}
   }
 
-  $("toggle").onclick=()=>{ if(listening){setState(false); rec&&rec.stop();} else start(); };
-  $("clear").onclick=()=>{ transcript.length=0; tape.querySelectorAll(".line,.answer").forEach(n=>n.remove()); emptyEl.hidden=false; };
+  $("toggle").onclick=()=>{ if(listening){setState(false); rec&&rec.stop(); setTimeout(flush,600);} else start(); };
+  $("clear").onclick=()=>{ transcript.length=0; pending=[]; answeredLog=[]; clearTimeout(flushTimer); tape.querySelectorAll(".line,.answer").forEach(n=>n.remove()); emptyEl.hidden=false; };
   $("copy").onclick=async()=>{
     const out=[...tape.querySelectorAll(".line,.answer")].map(n=>n.classList.contains("answer")?"  → "+n.querySelector("span:last-child").textContent:n.textContent.replace(/^(\d\d:\d\d)/,"[$1] ")).join("\n");
     try{await navigator.clipboard.writeText(out); $("copy").textContent="Скопировано";}catch(e){$("copy").textContent="Не вышло";}
