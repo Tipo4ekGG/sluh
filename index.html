@@ -98,10 +98,26 @@ summary{padding:10px 14px;cursor:pointer;font-weight:500}
           <option value="manual">Только по нажатию на строку</option>
         </select>
       </label>
-      <label>Ключ Claude API
-        <input id="key" type="password" autocomplete="off" placeholder="sk-ant-…">
+      <label>Адрес сервера
+        <input id="base" type="url" autocomplete="off" placeholder="https://api.anthropic.com/v1">
       </label>
-      <p class="hint">Ключ хранится только в этом браузере и отправляется только на api.anthropic.com. Без ключа страница всё равно ведёт расшифровку и подсвечивает вопросы. Нажатие на любую строку отправляет её как вопрос.</p>
+      <label>Формат запросов
+        <select id="fmt">
+          <option value="auto">Автоматически</option>
+          <option value="openai">OpenAI-совместимый (/chat/completions)</option>
+          <option value="anthropic">Anthropic (/messages)</option>
+        </select>
+      </label>
+      <label>Ключ API
+        <input id="key" type="password" autocomplete="off" placeholder="sk-…">
+      </label>
+      <label>Модель
+        <input id="model" type="text" autocomplete="off" list="models" placeholder="нажмите «Проверить», чтобы увидеть список">
+        <datalist id="models"></datalist>
+      </label>
+      <button class="btn" id="check" type="button">Проверить ключ и загрузить модели</button>
+      <p class="hint" id="checkResult" hidden></p>
+      <p class="hint">Ключ хранится только в этом браузере и отправляется только на указанный сервер. Без ключа страница всё равно ведёт расшифровку и подсвечивает вопросы. Нажатие на любую строку отправляет её как вопрос.</p>
     </div>
   </details>
 
@@ -123,8 +139,11 @@ summary{padding:10px 14px;cursor:pointer;font-weight:500}
   $("lang").value = store.get("lang","ru-RU");
   $("mode").value = store.get("mode","questions");
   $("key").value = store.get("key","");
-  if(!$("key").value) $("settingsBox").open = true;
-  ["lang","mode","key"].forEach(id=>$(id).addEventListener("change",()=>{store.set(id,$(id).value); if(id==="lang"&&listening){rec.stop();}}));
+  $("base").value = store.get("base","https://freecodex.fun/v1");
+  $("fmt").value = store.get("fmt","auto");
+  $("model").value = store.get("model","");
+  if(!$("key").value || !$("model").value) $("settingsBox").open = true;
+  ["lang","mode","key","base","fmt","model"].forEach(id=>$(id).addEventListener("change",()=>{store.set(id,$(id).value); if(id==="lang"&&listening){rec.stop();}}));
 
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   function showNote(msg){note.textContent=msg;note.hidden=!msg;}
@@ -182,25 +201,79 @@ summary{padding:10px 14px;cursor:pointer;font-weight:500}
     const context=transcript.map(l=>l.text).join("\n").slice(-4000);
     const prompt="Ты слушаешь живую речь через диктофон и подсказываешь ответы. Ниже расшифровка последних минут; в ней могут быть ошибки распознавания.\n\n<расшифровка>\n"+context+"\n</расшифровка>\n\nПоследняя реплика: «"+question+"».\nЕсли в ней есть вопрос, дай на него точный ответ в 1–4 предложениях. Если это не вопрос, дай короткий полезный комментарий в одном предложении. Отвечай на языке реплики, без вступлений.";
     try{
-      const r=await fetch("https://api.anthropic.com/v1/messages",{
-        method:"POST",
-        headers:{"content-type":"application/json","x-api-key":key,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
-        body:JSON.stringify({model:"claude-haiku-5-5",max_tokens:400,messages:[{role:"user",content:prompt}]})
-      });
-      const data=await r.json().catch(()=>({}));
-      if(!r.ok){
-        const m=data&&data.error&&data.error.message||("код "+r.status);
-        box.className="answer err";
-        body.textContent=r.status===401?"Ключ не подошёл. Проверьте его в настройках.":"Ошибка API: "+m;
-        return;
-      }
+      const text=await callModel(prompt);
       box.className="answer";
-      body.textContent=(data.content||[]).filter(c=>c.type==="text").map(c=>c.text).join("\n").trim()||"(пустой ответ)";
+      body.textContent=text||"(пустой ответ)";
     }catch(e){
-      box.className="answer err"; body.textContent="Нет связи с сервером. Нажмите на строку ещё раз, чтобы повторить."; delete row.dataset.asked;
+      box.className="answer err"; body.textContent=e.message; delete row.dataset.asked;
     }
     scrollDown();
   }
+
+  function cfg(){
+    const base=($("base").value.trim()||"https://api.anthropic.com/v1").replace(/\/+$/,"");
+    const official=/^https:\/\/api\.anthropic\.com/i.test(base);
+    let fmt=$("fmt").value;
+    if(fmt==="auto") fmt=official?"anthropic":"openai";
+    return {base,official,fmt,key:$("key").value.trim(),model:$("model").value.trim()||(official?"claude-haiku-5-5":"")};
+  }
+  function headers(c){
+    const h={"content-type":"application/json","authorization":"Bearer "+c.key};
+    if(c.fmt==="anthropic"||c.official){h["x-api-key"]=c.key;h["anthropic-version"]="2023-06-01";}
+    if(c.official){delete h.authorization;h["anthropic-dangerous-direct-browser-access"]="true";}
+    return h;
+  }
+  function apiError(status,data){
+    const m=(data&&data.error&&(data.error.message||data.error))||(data&&data.message)||("код "+status);
+    if(status===401||status===403) return new Error("Ключ не подошёл ("+status+"). Проверьте ключ и адрес сервера.");
+    if(status===402) return new Error("На счёте закончились средства.");
+    if(status===404) return new Error("Сервер не нашёл адрес или модель. Проверьте адрес сервера, формат и название модели.");
+    if(status===429) return new Error("Слишком много запросов или исчерпан лимит. Подождите немного.");
+    return new Error("Ошибка API: "+(typeof m==="string"?m:JSON.stringify(m)));
+  }
+  async function post(url,c,body){
+    let r;
+    try{ r=await fetch(url,{method:"POST",headers:headers(c),body:JSON.stringify(body)}); }
+    catch(e){ throw new Error("Сервер не отвечает или не принимает запросы из браузера. Нажмите на строку ещё раз, чтобы повторить."); }
+    const data=await r.json().catch(()=>({}));
+    return {r,data};
+  }
+  async function callModel(prompt){
+    const c=cfg();
+    if(!c.model) throw new Error("Укажите модель в настройках (кнопка «Проверить» покажет список).");
+    const messages=[{role:"user",content:prompt}];
+    if(c.fmt==="anthropic"){
+      const {r,data}=await post(c.base+"/messages",c,{model:c.model,max_tokens:400,messages});
+      if(!r.ok) throw apiError(r.status,data);
+      return (data.content||[]).filter(x=>x.type==="text").map(x=>x.text).join("\n").trim();
+    }
+    let {r,data}=await post(c.base+"/chat/completions",c,{model:c.model,max_tokens:400,messages});
+    if(!r.ok && r.status===400 && /max_tokens/i.test(JSON.stringify(data))){
+      ({r,data}=await post(c.base+"/chat/completions",c,{model:c.model,max_completion_tokens:400,messages}));
+    }
+    if(!r.ok) throw apiError(r.status,data);
+    const msg=data.choices&&data.choices[0]&&data.choices[0].message;
+    const content=msg&&msg.content;
+    return (Array.isArray(content)?content.map(p=>p.text||"").join(""):content||"").trim();
+  }
+
+  $("check").onclick=async()=>{
+    const out=$("checkResult"), c=cfg();
+    out.hidden=false; out.textContent="Проверяю…";
+    if(!c.key){out.textContent="Сначала вставьте ключ.";return;}
+    let r,data;
+    try{ r=await fetch(c.base+"/models",{headers:headers(c)}); data=await r.json().catch(()=>({})); }
+    catch(e){ out.textContent="Сервер не отвечает или не принимает запросы из браузера. Проверьте адрес."; return; }
+    if(!r.ok){ out.textContent=apiError(r.status,data).message; return; }
+    const ids=((data&&data.data)||[]).map(m=>m.id).filter(Boolean).sort();
+    const dl=$("models"); dl.innerHTML="";
+    ids.forEach(id=>{const o=document.createElement("option");o.value=id;dl.append(o);});
+    out.textContent=ids.length?"Ключ рабочий. Доступно моделей: "+ids.length+". Кликните по полю «Модель», чтобы выбрать. Для быстрых ответов подойдут модели с mini, haiku или flash в названии.":"Ключ принят, но сервер не прислал список моделей. Впишите название модели вручную.";
+    if(ids.length && !$("model").value){
+      const pick=ids.find(i=>/haiku/i.test(i))||ids.find(i=>/mini|flash/i.test(i))||ids[0];
+      $("model").value=pick; store.set("model",pick);
+    }
+  };
 
   function setState(on){
     listening=on; app.classList.toggle("on",on);
