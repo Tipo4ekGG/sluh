@@ -83,6 +83,7 @@ button{cursor:pointer}
 .answer{margin:0 0 8px 52px;padding:10px 12px;background:var(--surface);border:1px solid var(--line);border-radius:12px;white-space:pre-wrap;overflow-wrap:anywhere}
 .answer .who{display:block;font:500 11px var(--font-mono);color:var(--accent);text-transform:uppercase;letter-spacing:.08em;margin-bottom:3px}
 .answer.wait .body{color:var(--muted)}
+.qlabel{display:block;color:var(--muted);font-size:13px;margin-bottom:2px}
 .answer.err{border-color:var(--rec)}
 .answer.err .who{color:var(--rec)}
 .to-bottom{position:absolute;left:50%;transform:translateX(-50%);bottom:calc(100% + 10px);border:1px solid var(--line);background:var(--surface);color:var(--fg);border-radius:999px;padding:7px 14px;font-size:13px;font-weight:500;box-shadow:0 2px 10px rgba(0,0,0,.12)}
@@ -378,19 +379,22 @@ details.more[open] summary{margin-bottom:10px}
   tape.addEventListener("scroll",()=>{ if(nearBottom()) $("toBottom").hidden=true; },{passive:true});
   $("toBottom").onclick=scrollDown;
 
-  function renderLine(time,text){
-    emptyEl.hidden=true;
+  function createLineItem(time,text){
     const row=document.createElement("div");
     row.className="line"; row.tabIndex=0; row.title="Нажмите, чтобы спросить модель об этой строке";
     const item={time,text,row,status:null,answers:[]};
-    transcript.push(item);
     const t=document.createElement("span"); t.className="t"; t.textContent=time;
     const x=document.createElement("span"); x.className="txt"; x.textContent=text;
     row.append(t,x);
-    tape.append(row);
     const ask=()=>{ if(window.getSelection && String(window.getSelection()).length) return; if(!row.dataset.asked) answer([item],"manual"); };
     row.addEventListener("click",ask);
     row.addEventListener("keydown",e=>{ if(e.key==="Enter") ask(); });
+    return item;
+  }
+  function renderLine(time,text){
+    emptyEl.hidden=true;
+    const item=createLineItem(time,text);
+    transcript.push(item); tape.append(item.row);
     return item;
   }
   function addLine(text){
@@ -409,7 +413,15 @@ details.more[open] summary{margin-bottom:10px}
     anchor.after(box);
     return {box,body};
   }
-  function renderAnswerBox(item,text){ makeAnswerBox(item).body.textContent=text; }
+  function setAnswer(u,q,a){
+    u.body.textContent="";
+    if(q){ const l=document.createElement("span"); l.className="qlabel"; l.textContent=q; u.body.append(l); }
+    u.body.append(document.createTextNode(a));
+  }
+  function renderAnswerBox(item,text){
+    const m=text.match(/^«(.+)»\n([\s\S]*)$/);
+    const u=makeAnswerBox(item); if(m) setAnswer(u,m[1],m[2]); else u.body.textContent=text;
+  }
 
   // ---- Склейка речи по паузам ----
   // Строки копятся, пока человек говорит. После паузы кусок оценивается целиком:
@@ -439,6 +451,39 @@ details.more[open] summary{margin-bottom:10px}
     const i=group.findIndex(x=>maybeQuestion(x.text)||hasOptions(x.text));
     return i<0?group.slice(-1):group.slice(i);
   }
+
+  // Ответ модели приходит парами строк: «? слова вопроса» и «= ответ».
+  // Разбираем его по мере печати.
+  function parsePairs(t){
+    const pairs=[]; let cur=null, plain=[];
+    const lines=t.split("\n");
+    lines.forEach((ln,i)=>{
+      const done=i<lines.length-1;
+      const m=ln.match(/^\s*([?？=])\s?(.*)$/);
+      if(m && m[1]!=="="){ cur={q:m[2].trim(),qDone:done,a:""}; pairs.push(cur); }
+      else if(m && m[1]==="="){ if(!cur){ cur={q:"",qDone:true,a:""}; pairs.push(cur); } cur.a=(cur.a?cur.a+"\n":"")+m[2]; }
+      else if(cur){ if(cur.a||ln.trim()) cur.a=(cur.a?cur.a+"\n":"")+ln; }
+      else plain.push(ln);
+    });
+    if(!pairs.length) return {plain:plain.join("\n").trim(),pairs:[]};
+    pairs.forEach(p=>p.a=p.a.trim());
+    return {plain:"",pairs};
+  }
+  const normWord=w=>w.toLowerCase().replace(/ё/g,"е").replace(/[^\p{L}\p{N}]/gu,"");
+  // Где в куске речи начинается каждый вопрос (номер слова). null — если не нашли.
+  function findStarts(words,quotes){
+    const nw=words.map(normWord), starts=[]; let from=0;
+    for(const q of quotes){
+      const qw=q.split(/\s+/).map(normWord).filter(Boolean);
+      if(!qw.length) return null;
+      const k=Math.min(3,qw.length); let at=-1;
+      for(let i=from;i<=nw.length-k && at<0;i++){ let ok=true; for(let j=0;j<k;j++) if(nw[i+j]!==qw[j]){ok=false;break;} if(ok) at=i; }
+      if(at<0) return null;
+      starts.push(at); from=at+1;
+    }
+    return starts;
+  }
+
   // ---- Ответ модели ----
   async function answer(group,kind){
     const last=group[group.length-1];
@@ -447,7 +492,7 @@ details.more[open] summary{margin-bottom:10px}
       return;
     }
     group.forEach(i=>i.row.dataset.asked="1");
-    let ui=null;
+    let ui=null, extra=null, split=null; // split: [{item, ui}] после разрезания строки на несколько вопросов
     const near=nearBottom();
     if(kind==="auto"){ last.row.classList.add("checking"); }
     else{ questionPart(group).forEach(i=>i.row.classList.add("q")); ui=makeAnswerBox(last); ui.box.classList.add("wait"); ui.body.textContent="Думаю…"; follow(near); }
@@ -456,40 +501,98 @@ details.more[open] summary{margin-bottom:10px}
     const context=transcript.map(l=>l.text).join("\n").slice(-4000);
     const done=answeredLog.length?"<уже_отвечено>\n"+answeredLog.join("\n")+"\n</уже_отвечено>\n\n":"";
     const common="Ты слушаешь живую речь (лекцию, разговор, устный тест) через диктофон и подсказываешь ответы. Распознавание не ставит знаков препинания, может ошибаться в словах и резать фразы в случайных местах: начало вопроса может оказаться в одной строке, а продолжение в следующей.\n\n<расшифровка>\n"+context+"\n</расшифровка>\n\n"+done;
-    const rules="- Если в нём есть вопрос (прямой, косвенный или задание вроде «объясните…», «назовите…»), ответь на него точно, в 1–4 предложениях. Если начало вопроса было в предыдущих строках расшифровки, склей их.\n- Если это вопрос с вариантами ответа (а/б/в, первый/второй, «X или Y», «верно или неверно»), начни с правильного варианта, например «Ответ: б) Париж», и добавь одно предложение, почему.\n- Если фрагмент содержит варианты ответа или уточнение к вопросу, который прозвучал раньше, ответь на весь вопрос целиком с учётом вариантов, даже если на него уже отвечали без них.\n";
+    const rules="- Если в нём есть вопрос (прямой, косвенный или задание вроде «объясните…», «назовите…»), ответь на него точно, в 1–4 предложениях. Если начало вопроса было в предыдущих строках расшифровки, склей их.\n- Если это вопрос с вариантами ответа (а/б/в, первый/второй, «X или Y», «верно или неверно»), начни ответ с правильного варианта, например «Ответ: б) Париж», и добавь одно предложение, почему.\n- Если фрагмент содержит варианты ответа или уточнение к вопросу, который прозвучал раньше, ответь на весь вопрос целиком с учётом вариантов, даже если на него уже отвечали без них.\n- Если во фрагменте несколько разных вопросов, ответь на каждый отдельно.\n";
+    const format="\nФормат ответа строго такой, по паре строк на каждый вопрос, в том порядке, в котором вопросы прозвучали:\n? <слова, с которых начинается вопрос, точно как они записаны во фрагменте>\n= <ответ>\nНичего, кроме этих строк, не пиши.";
     let prompt;
     if(kind==="manual"){
-      prompt=common+"Пользователь сам отметил строку: «"+fragment+"». Вопрос может начинаться в предыдущей строке расшифровки или продолжаться в следующей.\n\nПравила:\n"+rules+"- Если вопроса нет, дай короткий полезный комментарий в одном предложении.\nОтвечай на языке фрагмента, без вступлений.";
+      prompt=common+"Пользователь сам отметил строку: «"+fragment+"». Вопрос может начинаться в предыдущей строке расшифровки или продолжаться в следующей.\n\nПравила:\n"+rules+"- Если вопроса нет, напиши одну строку «= » с коротким полезным комментарием.\n"+format+"\nОтвечай на языке фрагмента, без вступлений.";
     }else if(kind==="all"){
-      prompt=common+"Новый фрагмент речи: «"+fragment+"».\n\nПравила:\n"+rules+"- Если вопроса нет, дай короткий полезный комментарий в одном предложении.\nОтвечай на языке фрагмента, без вступлений.";
+      prompt=common+"Новый фрагмент речи: «"+fragment+"».\n\nПравила:\n"+rules+"- Если вопроса нет, напиши одну строку «= » с коротким полезным комментарием.\n"+format+"\nОтвечай на языке фрагмента, без вступлений.";
     }else{
-      prompt=common+"Новый фрагмент речи: «"+fragment+"».\n\nПравила:\n"+rules+"- Если вопрос явно оборван на полуслове и его продолжение ещё не прозвучало, ответь ровно одним символом: …\n- Если вопроса нет (например, «когда я был студентом…», «я не знаю, где он») или на него уже ответили и ничего нового не прозвучало, ответь ровно одним символом: —\nОтвечай на языке фрагмента, без вступлений.";
+      prompt=common+"Новый фрагмент речи: «"+fragment+"».\n\nПравила:\n"+rules+"- Если вопрос явно оборван на полуслове и его продолжение ещё не прозвучало, ответь ровно одним символом: …\n- Если вопроса нет (например, «когда я был студентом…», «я не знаю, где он») или на него уже ответили и ничего нового не прозвучало, ответь ровно одним символом: —\n"+format+"\nОтвечай на языке фрагмента, без вступлений.";
     }
+
+    // Разрезает строки куска на «вступление + вопрос 1 + вопрос 2…» и ставит ответ под каждым.
+    function trySplit(pairs){
+      const quotes=pairs.map(p=>p.q);
+      const words=fragment.split(/\s+/).filter(Boolean);
+      const starts=findStarts(words,quotes);
+      if(!starts) return false;
+      const idx=transcript.indexOf(group[0]); if(idx<0) return false;
+      const time=group[0].time;
+      const segs=[];
+      if(starts[0]>0) segs.push({text:words.slice(0,starts[0]).join(" "),q:false});
+      const LINK=new Set(["и","а","также","ещё","еще","потом","затем","and","also","then","و"]);
+      const trimTail=w=>{ while(w.length>1 && LINK.has(normWord(w[w.length-1]))) w=w.slice(0,-1); return w; };
+      starts.forEach((s,j)=>{ let w=words.slice(s,j+1<starts.length?starts[j+1]:words.length); if(j+1<starts.length) w=trimTail(w); segs.push({text:w.join(" "),q:true}); });
+      if(segs[0] && !segs[0].q){ segs[0].text=trimTail(segs[0].text.split(" ")).join(" "); }
+      // убираем старые строки и их ответ
+      let anchor=group[0].row.previousElementSibling;
+      if(ui) ui.box.remove(); ui=null;
+      group.forEach(i=>i.row.remove());
+      transcript.splice(idx,group.length);
+      split=[];
+      const newItems=segs.map(sg=>{
+        const it=createLineItem(time,sg.text);
+        if(anchor) anchor.after(it.row); else tape.prepend(it.row);
+        anchor=it.row;
+        if(sg.q){ it.row.classList.add("q"); it.status="answered"; it.row.dataset.asked="1"; const u=makeAnswerBox(it); anchor=u.box; split.push({item:it,ui:u}); }
+        return it;
+      });
+      transcript.splice(idx,0,...newItems);
+      group=newItems;
+      return true;
+    }
+    function render(t,final){
+      const n=nearBottom();
+      const {plain,pairs}=parsePairs(t);
+      const answers=pairs.length?pairs:[{q:"",qDone:true,a:plain}];
+      if(!split && answers.length>=2 && answers.slice(0,2).every(p=>p.qDone)){
+        trySplit(answers);
+      }
+      if(split){
+        split.forEach((s,j)=>{ const a=(answers[j]&&answers[j].a)||""; s.ui.box.classList.toggle("wait",!a); s.ui.body.textContent=a||"Думаю…"; });
+      }else{
+        // не получилось разрезать строку: отдельная карточка на каждый вопрос
+        const visible=answers.filter(p=>p.a);
+        if(!visible.length){ if(final&&ui){ ui.body.textContent="(пустой ответ)"; ui.box.classList.remove("wait"); } return; }
+        if(!ui){ questionPart(group).forEach(i=>i.row.classList.add("q")); ui=makeAnswerBox(group[group.length-1]); }
+        extra=extra||[];
+        visible.forEach((p,j)=>{
+          const u=j===0?ui:(extra[j-1]||(extra[j-1]=makeAnswerBox(group[group.length-1])));
+          u.box.classList.remove("wait");
+          setAnswer(u,visible.length>1?p.q:"",p.a);
+        });
+      }
+      last.row.classList.remove("checking");
+      follow(n);
+    }
+
     const noise=/^[\s—–\-.…]*$/;
     try{
-      // Текст печатается по мере того, как модель его пишет. Карточка ответа в
-      // режиме «сам» появляется только когда пошли настоящие слова, а не «—» или «…».
-      const text=(await callModel(prompt,t=>{
-        if(noise.test(t)) return;
-        const n=nearBottom();
-        if(!ui){ questionPart(group).forEach(i=>i.row.classList.add("q")); ui=makeAnswerBox(last); }
-        last.row.classList.remove("checking");
-        ui.box.classList.remove("wait"); ui.body.textContent=t;
-        follow(n);
-      })||"").trim();
+      const text=(await callModel(prompt,t=>{ if(!noise.test(t)) render(t,false); })||"").trim();
       last.row.classList.remove("checking");
       if(kind==="auto" && /^(…|\.{3})$/.test(text)){ if(ui) ui.box.remove(); release("incomplete"); return; }
       if(kind==="auto" && noise.test(text)){ if(ui) ui.box.remove(); group.forEach(i=>i.row.classList.remove("q")); release("rejected"); return; }
-      if(!ui) ui=makeAnswerBox(last);
-      group.forEach(i=>{i.status="answered";}); questionPart(group).forEach(i=>i.row.classList.add("q"));
-      ui.box.classList.remove("wait"); ui.body.textContent=text||"(пустой ответ)";
+      render(text,true);
+      const {plain,pairs}=parsePairs(text);
+      const answers=pairs.length?pairs:[{q:"",a:plain}];
+      if(split){
+        split.forEach((s,j)=>{ s.item.answers=[(answers[j]&&answers[j].a)||""]; delete s.item.row.dataset.asked; });
+        group.forEach(i=>{ if(!i.status) i.status="answered"; delete i.row.dataset.asked; });
+      }else{
+        const visible=answers.filter(p=>p.a);
+        const saved=visible.length>1?visible.map(p=>(p.q?"«"+p.q+"»\n":"")+p.a):visible.map(p=>p.a);
+        group.forEach(i=>{i.status="answered"; delete i.row.dataset.asked;});
+        group[group.length-1].answers=(group[group.length-1].answers||[]).concat(saved);
+      }
       answeredLog.push(fragment.slice(0,200)); if(answeredLog.length>6) answeredLog.shift();
-      last.answers=(last.answers||[]).concat(text); saveSoon();
+      saveSoon();
     }catch(e){
       last.row.classList.remove("checking");
       const n=nearBottom();
-      if(!ui) ui=makeAnswerBox(last);
-      ui.box.className="answer err"; ui.box.firstChild.textContent="Не получилось"; ui.body.textContent=e.message+" Нажмите на строку, чтобы повторить.";
+      if(!ui && !split) ui=makeAnswerBox(last);
+      if(ui){ ui.box.className="answer err"; ui.box.firstChild.textContent="Не получилось"; ui.body.textContent=e.message+" Нажмите на строку, чтобы повторить."; }
       questionPart(group).forEach(i=>i.row.classList.add("q"));
       release(null); follow(n);
     }
