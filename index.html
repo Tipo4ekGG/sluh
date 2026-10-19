@@ -4,6 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Слушатель</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#0f7a5c">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Слушатель">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
@@ -77,10 +85,21 @@ summary{padding:10px 14px;cursor:pointer;font-weight:500}
 .chat-act.danger{color:var(--rec)}
 .chat-open:focus-visible,.chat-act:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
 .btn.small{padding:6px 10px;font-size:13px}
+body{overscroll-behavior-y:none}
+.sync{font:500 11px var(--font-mono);color:var(--muted);letter-spacing:.04em;padding-bottom:8px;min-height:1.4em}
+.sync[data-kind="ok"]{color:var(--accent)}
+.sync[data-kind="err"]{color:var(--rec)}
+.auth-out{display:flex;flex-wrap:wrap;align-items:center;gap:10px;justify-content:space-between}
+.auth-out p{margin:0;min-width:0;overflow-wrap:anywhere}
+.ptr{position:fixed;left:0;right:0;top:calc(env(safe-area-inset-top,0px) - 48px);display:flex;justify-content:center;pointer-events:none;z-index:20;opacity:0}
+.ptr span{background:var(--surface);color:var(--fg);border:1px solid var(--line);border-radius:999px;padding:8px 14px;font:500 13px var(--font-body);box-shadow:0 2px 10px rgba(0,0,0,.12)}
+.ptr.ready span{border-color:var(--accent);color:var(--accent)}
+.ptr.back{transition:transform .2s ease,opacity .2s ease}
 @media (max-width:420px){.line{grid-template-columns:44px 1fr}.answer{margin-left:0}.interim{padding-left:8px}}
 </style>
 </head>
 <body>
+<div class="ptr" id="ptr" aria-hidden="true"><span id="ptrText">Потяните, чтобы обновить</span></div>
 <div class="wrap" id="app">
   <header>
     <h1>Слушатель</h1>
@@ -92,7 +111,28 @@ summary{padding:10px 14px;cursor:pointer;font-weight:500}
     <button class="btn" id="chatsBtn">Чаты</button>
     <button class="btn" id="clear">Новый чат</button>
     <button class="btn" id="copy">Скопировать</button>
+    <button class="btn" id="authBtn">Войти</button>
   </div>
+  <div class="sync" id="sync"></div>
+
+  <section class="chats" id="authBox" hidden>
+    <div class="chats-head"><strong>Аккаунт</strong><button class="btn small" id="closeAuth" type="button">Закрыть</button></div>
+    <form id="authForm" class="settings" style="padding:0">
+      <label>Email
+        <input id="email" type="email" autocomplete="username" required>
+      </label>
+      <label>Пароль
+        <input id="password" type="password" autocomplete="current-password" required>
+      </label>
+      <button class="btn primary" type="submit" id="signIn">Войти</button>
+      <p class="hint">Входите тем же email и паролем, что в AURA. После входа чаты сохраняются в облаке и обновляются сразу на всех устройствах.</p>
+      <p class="hint" id="authMsg" hidden></p>
+    </form>
+    <div class="auth-out" id="authOut" hidden>
+      <p>Вы вошли как <b id="whoami"></b></p>
+      <button class="btn" id="signOut" type="button">Выйти</button>
+    </div>
+  </section>
 
   <section class="chats" id="chats" hidden>
     <div class="chats-head"><strong>Чаты</strong><button class="btn small" id="closeChats" type="button">Закрыть</button></div>
@@ -317,7 +357,7 @@ summary{padding:10px 14px;cursor:pointer;font-weight:500}
     current.updated=Date.now();
     current.title=autoTitle();
     if(!chats.includes(current)){ chats.unshift(current); if(chats.length>MAX_CHATS) chats.length=MAX_CHATS; }
-    persist(); renderChatList();
+    persist(); renderChatList(); queuePush(current);
   }
   function resetTape(){
     clearTimeout(flushTimer); pending=[]; answeredLog=[]; transcript.length=0;
@@ -330,7 +370,10 @@ summary{padding:10px 14px;cursor:pointer;font-weight:500}
   }
   function openChat(id){
     const c=chats.find(x=>x.id===id); if(!c) return;
-    saveNow(); resetTape(); current=c; store.set("current",c.id);
+    saveNow(); renderChat(c); $("chats").hidden=true;
+  }
+  function renderChat(c){
+    resetTape(); current=c; store.set("current",c.id);
     for(const l of c.lines||[]){
       const item=renderLine(l.time,l.text);
       item.status=l.status||null; item.answers=(l.answers||[]).slice();
@@ -338,7 +381,7 @@ summary{padding:10px 14px;cursor:pointer;font-weight:500}
       item.answers.forEach(a=>renderAnswerBox(item,a));
       if(item.answers.length){ answeredLog.push(l.text.slice(0,200)); if(answeredLog.length>6) answeredLog.shift(); }
     }
-    renderChatList(); $("chats").hidden=true; scrollDown();
+    renderChatList(); scrollDown();
   }
   function chatText(c){
     const head=(c.title||"Чат")+"\n"+new Date(c.created).toLocaleString("ru-RU")+"\n\n";
@@ -367,7 +410,7 @@ summary{padding:10px 14px;cursor:pointer;font-weight:500}
       const del=document.createElement("button"); del.className="chat-act danger"; del.type="button"; del.textContent="Удалить";
       del.onclick=()=>{
         if(!del.dataset.armed){ del.dataset.armed="1"; del.textContent="Точно?"; setTimeout(()=>{delete del.dataset.armed; del.textContent="Удалить";},3000); return; }
-        chats=chats.filter(x=>x!==c); persist();
+        chats=chats.filter(x=>x!==c); persist(); cloudDelete(c.id);
         if(c===current){ current=null; newChat(); } else renderChatList();
       };
       li.append(open,dl,del); ul.append(li);
@@ -381,6 +424,117 @@ summary{padding:10px 14px;cursor:pointer;font-weight:500}
     while(anchor.nextElementSibling && anchor.nextElementSibling.classList.contains("answer")) anchor=anchor.nextElementSibling;
     anchor.after(box);
   }
+
+  // ---- Вход и синхронизация через Supabase: тот же аккаунт, что в AURA ----
+  const SB_URL="https://btvmezpdhhhmxraqirsc.supabase.co";
+  const SB_KEY="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJ0dm1lenBkaGhobXhyYXFpcnNjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTIwODkwNjIsImV4cCI6MjEwNzY2NTA2Mn0.c9nmQHy0mGIxitjTSde-s2WLpPR3Y6sYIMpgDYkcxQ4";
+  let DEVICE=store.get("device","");
+  if(!DEVICE){ DEVICE=Math.random().toString(36).slice(2,10); store.set("device",DEVICE); }
+  let sb=null;
+  try{ if(window.supabase) sb=window.supabase.createClient(SB_URL,SB_KEY,{auth:{persistSession:true,autoRefreshToken:true}}); }catch(e){ sb=null; }
+  let user=null, channel=null, dirty=new Set(), pushTimer=null, pushing=null;
+
+  function setSync(text,kind){ const el=$("sync"); el.textContent=text; el.dataset.kind=kind||""; }
+  function toRow(c){ return {id:c.id,title:c.title||"",lines:c.lines||[],created_at:new Date(c.created).toISOString(),updated_at:new Date(c.updated||c.created).toISOString(),updated_by:DEVICE}; }
+  function fromRow(r){ return {id:r.id,title:r.title||"",lines:Array.isArray(r.lines)?r.lines:[],created:Date.parse(r.created_at),updated:Date.parse(r.updated_at)}; }
+
+  function queuePush(c){ if(!user||!c) return; dirty.add(c.id); setSync("сохраняю…","busy"); clearTimeout(pushTimer); pushTimer=setTimeout(flushPush,1200); }
+  async function flushPush(){
+    clearTimeout(pushTimer);
+    if(!user||!dirty.size) return;
+    if(pushing) return pushing;
+    const ids=[...dirty]; dirty.clear();
+    const rows=ids.map(id=>chats.find(c=>c.id===id)).filter(Boolean).map(toRow);
+    pushing=(async()=>{
+      try{
+        const {error}=await sb.from("sluh_chats").upsert(rows);
+        if(error) throw error;
+        setSync("синхронизировано","ok");
+      }catch(e){ ids.forEach(id=>dirty.add(id)); setSync("нет связи, сохранено на устройстве","err"); }
+      pushing=null;
+    })();
+    return pushing;
+  }
+  async function cloudDelete(id){
+    if(!user) return;
+    const {error}=await sb.from("sluh_chats").delete().eq("id",id);
+    setSync(error?"не удалось удалить в облаке":"синхронизировано",error?"err":"ok");
+  }
+
+  function applyRemote(rc){
+    const local=chats.find(c=>c.id===rc.id);
+    if(!local){ chats.push(rc); }
+    else{
+      if(rc.updated<=(local.updated||0)) return false;
+      local.title=rc.title; local.lines=rc.lines; local.updated=rc.updated; local.created=rc.created;
+      if(local===current && !listening && !pending.length) renderChat(local);
+    }
+    return true;
+  }
+  function sortChats(){ chats.sort((a,b)=>(b.created||0)-(a.created||0)); }
+
+  async function pullAll(){
+    if(!user) return;
+    setSync("загружаю…","busy");
+    const {data,error}=await sb.from("sluh_chats").select("*").order("updated_at",{ascending:false}).limit(MAX_CHATS);
+    if(error){ setSync("нет связи, сохранено на устройстве","err"); return; }
+    const remoteIds=new Set();
+    let changed=false;
+    for(const r of data){ remoteIds.add(r.id); if(applyRemote(fromRow(r))) changed=true; }
+    // Чаты, которых ещё нет в облаке (например, записанные до входа), загружаем туда.
+    for(const c of chats){ if(!remoteIds.has(c.id) && (c.lines||[]).length) dirty.add(c.id); }
+    sortChats(); persist(); renderChatList();
+    if(dirty.size) await flushPush(); else setSync("синхронизировано","ok");
+  }
+
+  function subscribe(){
+    if(channel) sb.removeChannel(channel);
+    channel=sb.channel("sluh-"+user.id)
+      .on("postgres_changes",{event:"*",schema:"public",table:"sluh_chats",filter:"user_id=eq."+user.id},p=>{
+        if(p.eventType==="DELETE"){
+          const id=p.old&&p.old.id; const c=chats.find(x=>x.id===id); if(!c) return;
+          chats=chats.filter(x=>x!==c); persist();
+          if(c===current && !listening){ current=null; newChat(); } else renderChatList();
+          return;
+        }
+        const r=p.new; if(!r||r.updated_by===DEVICE) return;
+        if(applyRemote(fromRow(r))){ sortChats(); persist(); renderChatList(); }
+      })
+      .subscribe(status=>{ if(status==="SUBSCRIBED") setSync("синхронизировано","ok"); else if(status==="CHANNEL_ERROR"||status==="TIMED_OUT") setSync("нет живого обновления","err"); });
+  }
+
+  function renderAuth(){
+    $("authBtn").textContent=user?"Аккаунт":"Войти";
+    $("authForm").hidden=!!user; $("authOut").hidden=!user;
+    if(user) $("whoami").textContent=user.email||"";
+    if(!user) setSync(sb?"без входа: только это устройство":"облако недоступно","");
+  }
+  async function onSignedIn(u){
+    if(user && user.id===u.id) return;
+    user=u; renderAuth(); await pullAll(); subscribe();
+  }
+  function onSignedOut(){
+    user=null; if(channel){ sb.removeChannel(channel); channel=null; } dirty.clear(); renderAuth();
+  }
+  if(sb){
+    sb.auth.getSession().then(({data})=>{ if(data&&data.session) onSignedIn(data.session.user); else renderAuth(); });
+    sb.auth.onAuthStateChange((ev,session)=>{ if(session&&session.user) onSignedIn(session.user); else if(ev==="SIGNED_OUT") onSignedOut(); });
+  }
+  $("authForm").addEventListener("submit",async e=>{
+    e.preventDefault();
+    const msg=$("authMsg"); msg.hidden=false;
+    if(!sb){ msg.textContent="Не загрузилась библиотека входа. Обновите страницу."; return; }
+    msg.textContent="Вхожу…"; $("signIn").disabled=true;
+    const {data,error}=await sb.auth.signInWithPassword({email:$("email").value.trim(),password:$("password").value});
+    $("signIn").disabled=false;
+    if(error){ msg.textContent=/invalid/i.test(error.message)?"Неверный email или пароль.":/confirm/i.test(error.message)?"Email не подтверждён. Найдите письмо от Supabase и перейдите по ссылке.":"Не получилось войти: "+error.message; return; }
+    msg.hidden=true; $("password").value=""; $("authBox").hidden=true;
+    onSignedIn(data.user);
+  });
+  $("signOut").onclick=async()=>{ await flushPush(); await sb.auth.signOut(); onSignedOut(); };
+  $("authBtn").onclick=()=>{ $("authBox").hidden=!$("authBox").hidden; $("chats").hidden=true; };
+  $("closeAuth").onclick=()=>{ $("authBox").hidden=true; };
+  document.addEventListener("visibilitychange",()=>{ if(document.visibilityState==="visible" && user) pullAll(); else if(user) flushPush(); });
 
   function cfg(){
     const base=($("base").value.trim()||"https://api.anthropic.com/v1").replace(/\/+$/,"");
@@ -508,7 +662,7 @@ summary{padding:10px 14px;cursor:pointer;font-weight:500}
 
   $("toggle").onclick=()=>{ if(listening){setState(false); rec&&rec.stop(); setTimeout(flush,600);} else start(); };
   $("clear").onclick=()=>newChat();
-  $("chatsBtn").onclick=()=>{ saveNow(); renderChatList(); $("chats").hidden=!$("chats").hidden; };
+  $("chatsBtn").onclick=()=>{ saveNow(); renderChatList(); $("chats").hidden=!$("chats").hidden; $("authBox").hidden=true; };
   $("closeChats").onclick=()=>{ $("chats").hidden=true; };
   $("copy").onclick=async()=>{
     saveNow();
@@ -516,7 +670,46 @@ summary{padding:10px 14px;cursor:pointer;font-weight:500}
     try{await navigator.clipboard.writeText(out); $("copy").textContent="Скопировано";}catch(e){$("copy").textContent="Не вышло";}
     setTimeout(()=>$("copy").textContent="Скопировать",1500);
   };
-  window.addEventListener("pagehide",saveNow);
+  // ---- Обновление свайпом вниз (нужно, когда сайт открыт как приложение с главного экрана) ----
+  (function(){
+    const ptr=$("ptr"), label=$("ptrText"), LIMIT=70;
+    let y0=null, x0=0, pull=0, active=false;
+    function atTop(el){
+      for(let n=el; n && n!==document.body && n.nodeType===1; n=n.parentElement){
+        const st=getComputedStyle(n).overflowY;
+        if((st==="auto"||st==="scroll") && n.scrollHeight>n.clientHeight+1 && n.scrollTop>0) return false;
+      }
+      return (document.scrollingElement||document.documentElement).scrollTop<=0;
+    }
+    function show(d){
+      ptr.classList.remove("back");
+      ptr.style.transform="translateY("+d+"px)"; ptr.style.opacity=String(Math.min(1,d/50));
+      const ready=d>=LIMIT; ptr.classList.toggle("ready",ready);
+      label.textContent=listening?"Остановите запись, чтобы обновить":ready?"Отпустите, чтобы обновить":"Потяните, чтобы обновить";
+    }
+    function hide(){ ptr.classList.add("back"); ptr.style.transform="translateY(0)"; ptr.style.opacity="0"; ptr.classList.remove("ready"); }
+    document.addEventListener("touchstart",e=>{
+      if(e.touches.length!==1 || e.target.closest("input,select,textarea")){ y0=null; return; }
+      y0=atTop(e.target)?e.touches[0].clientY:null; x0=e.touches[0].clientX; pull=0; active=false;
+    },{passive:true});
+    document.addEventListener("touchmove",e=>{
+      if(y0===null) return;
+      const dy=e.touches[0].clientY-y0, dx=Math.abs(e.touches[0].clientX-x0);
+      if(!active && (dy<=6 || dx>dy)) { if(dy<0) y0=null; return; }
+      active=true; if(e.cancelable) e.preventDefault();
+      pull=Math.min(Math.max(dy,0)*0.5,100); show(pull);
+    },{passive:false});
+    document.addEventListener("touchend",async()=>{
+      if(y0===null){ return; }
+      const go=active && pull>=LIMIT && !listening; y0=null; active=false;
+      if(!go){ hide(); return; }
+      label.textContent="Обновляю…";
+      try{ saveNow(); await Promise.race([flushPush(),new Promise(r=>setTimeout(r,1500))]); }catch(_){}
+      location.reload();
+    });
+  })();
+
+  window.addEventListener("pagehide",()=>{ saveNow(); flushPush(); });
   { const last=chats.find(c=>c.id===store.get("current",""));
     if(last) openChat(last.id); else newChat(); }
   document.addEventListener("visibilitychange",()=>{ if(document.visibilityState==="hidden") saveNow(); });
