@@ -312,7 +312,7 @@ details.more[open] summary{margin-bottom:10px}
         <p class="hint">Ключ хранится только на этом устройстве и в облако не попадает.</p>
       </div>
     </div>
-    <p class="hint" style="text-align:center">Версия сайта от 19 октября, №6</p>
+    <p class="hint" style="text-align:center">Версия сайта от 19 октября, №7</p>
   </div>
 </section>
 
@@ -563,7 +563,7 @@ details.more[open] summary{margin-bottom:10px}
     const context=transcript.map(l=>l.text).join("\n").slice(-4000);
     const done=answeredLog.length?"<уже_отвечено>\n"+answeredLog.join("\n")+"\n</уже_отвечено>\n\n":"";
     const common="Ты слушаешь живую речь (лекцию, разговор, устный тест) через диктофон и подсказываешь ответы. Распознавание не ставит знаков препинания, может ошибаться в словах и резать фразы в случайных местах: начало вопроса может оказаться в одной строке, а продолжение в следующей.\n\n<расшифровка>\n"+context+"\n</расшифровка>\n\n"+done;
-    const rules="- Если в нём есть вопрос (прямой, косвенный или задание вроде «объясните…», «назовите…»), ответь на него точно, в 1–4 предложениях. Если начало вопроса было в предыдущих строках расшифровки, склей их.\n- Если это вопрос с вариантами ответа (а/б/в, первый/второй, «X или Y», «верно или неверно»), начни ответ с правильного варианта, например «Ответ: б) Париж», и добавь одно предложение, почему.\n- Если фрагмент содержит варианты ответа или уточнение к вопросу, который прозвучал раньше, ответь на весь вопрос целиком с учётом вариантов, даже если на него уже отвечали без них.\n- Если во фрагменте несколько разных вопросов, ответь на каждый отдельно.\n";
+    const rules="- Если в нём есть вопрос (прямой, косвенный или задание вроде «объясните…», «назовите…»), ответь на него точно, в 1–4 предложениях. Если начало вопроса было в предыдущих строках расшифровки, склей их.\n- Если это вопрос с вариантами ответа (а/б/в, первый/второй, «X или Y», «верно или неверно»), начни ответ с правильного варианта, например «Ответ: б) Париж», и добавь одно предложение, почему.\n- Если фрагмент содержит варианты ответа или уточнение к вопросу, который прозвучал раньше, ответь на весь вопрос целиком с учётом вариантов, даже если на него уже отвечали без них.\n- Если во фрагменте несколько разных вопросов, ответь на каждый отдельно.\n- Отвечай только на вопросы, которые есть в самом фрагменте. Расшифровка дана для контекста: на вопросы из других её строк не отвечай, на них ответят отдельно.\n";
     const format="\nФормат ответа строго такой, по паре строк на каждый вопрос, в том порядке, в котором вопросы прозвучали:\n? <слова, с которых начинается вопрос, точно как они записаны во фрагменте>\n= <ответ>\nНичего, кроме этих строк, не пиши. Пример для фрагмента «итак какая столица франции и сколько будет два плюс два»:\n? какая столица франции\n= Париж.\n? сколько будет два плюс два\n= Четыре.";
     let prompt;
     if(kind==="manual"){
@@ -605,10 +605,25 @@ details.more[open] summary{margin-bottom:10px}
       group=newItems;
       return true;
     }
+    // Модель иногда отвечает и на вопрос из соседних строк расшифровки — тогда он
+    // получит ответ дважды. Оставляем только пары, чей вопрос есть в этом куске.
+    const fragStems=new Set(fragment.split(/\s+/).map(normWord).filter(w=>w.length>=3).map(w=>w.slice(0,3)));
+    function inFragment(q){
+      if(!q) return true;
+      const qs=q.split(/\s+/).map(normWord).filter(w=>w.length>=3);
+      if(!qs.length) return true;
+      return qs.filter(w=>fragStems.has(w.slice(0,3))).length/qs.length>=0.5;
+    }
+    function ownAnswers(t){
+      const {plain,pairs}=parsePairs(t);
+      if(!pairs.length) return [{q:"",qDone:true,a:plain}];
+      const own=pairs.filter(p=>inFragment(p.q));
+      return own;
+    }
     function render(t,final){
       const n=nearBottom();
-      const {plain,pairs}=parsePairs(t);
-      const answers=pairs.length?pairs:[{q:"",qDone:true,a:plain}];
+      const answers=ownAnswers(t);
+      if(!answers.length) return;
       if(!split && answers.length>=2 && answers.slice(0,2).every(p=>p.qDone)){
         trySplit(answers);
       }
@@ -620,6 +635,7 @@ details.more[open] summary{margin-bottom:10px}
         if(!visible.length){ if(final&&ui){ ui.body.textContent="(пустой ответ)"; ui.box.classList.remove("wait"); } return; }
         if(!ui){ questionPart(group).forEach(i=>i.row.classList.add("q")); ui=makeAnswerBox(group[group.length-1]); }
         extra=extra||[];
+        if(extra) extra.splice(Math.max(0,visible.length-1)).forEach(u=>u.box.remove());
         visible.forEach((p,j)=>{
           const u=j===0?ui:(extra[j-1]||(extra[j-1]=makeAnswerBox(group[group.length-1])));
           u.box.classList.remove("wait");
@@ -636,9 +652,15 @@ details.more[open] summary{margin-bottom:10px}
       last.row.classList.remove("checking");
       if(kind==="auto" && /^(…|\.{3})$/.test(text)){ if(ui) ui.box.remove(); release("incomplete"); return; }
       if(kind==="auto" && noise.test(text)){ if(ui) ui.box.remove(); group.forEach(i=>i.row.classList.remove("q")); release("rejected"); return; }
+      const answers=ownAnswers(text);
+      if(!answers.length || !answers.some(p=>p.a)){
+        // все ответы были про другие строки — для этого куска ответа нет
+        if(ui) ui.box.remove(); if(extra) extra.forEach(u=>u.box.remove());
+        if(kind==="auto"){ group.forEach(i=>i.row.classList.remove("q")); release("rejected"); return; }
+        ui=makeAnswerBox(group[group.length-1]); ui.body.textContent="Вопроса здесь нет.";
+        group.forEach(i=>{ delete i.row.dataset.asked; }); return;
+      }
       render(text,true);
-      const {plain,pairs}=parsePairs(text);
-      const answers=pairs.length?pairs:[{q:"",a:plain}];
       if(split){
         split.forEach((s,j)=>{ s.item.answers=[(answers[j]&&answers[j].a)||""]; delete s.item.row.dataset.asked; });
         group.forEach(i=>{ if(!i.status) i.status="answered"; delete i.row.dataset.asked; });
