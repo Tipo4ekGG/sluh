@@ -253,6 +253,15 @@ details.more[open] summary{margin-bottom:10px}
       </div>
     </div>
 
+    <div class="group" id="micHelp" hidden>
+      <h3>Микрофон на iPhone</h3>
+      <div class="card">
+        <p class="msg" id="micMode"></p>
+        <p class="hint"><b>Чтобы Safari не спрашивал каждый раз:</b> откройте сайт в Safari, нажмите значок слева в адресной строке → «Настройки веб-сайта» → «Микрофон» → «Разрешить». Или для всех сайтов сразу: Настройки → Приложения → Safari → Микрофон → «Разрешить».</p>
+        <p class="hint"><b>Если запись идёт, а текста нет:</b> проверьте, что Safari разрешено распознавание речи: Настройки → Конфиденциальность и безопасность → Распознавание речи. Сайт и сам перезапускает зависшее распознавание через несколько секунд.</p>
+      </div>
+    </div>
+
     <div class="group">
       <h3>Распознавание</h3>
       <div class="card">
@@ -303,6 +312,7 @@ details.more[open] summary{margin-bottom:10px}
         <p class="hint">Ключ хранится только на этом устройстве и в облако не попадает.</p>
       </div>
     </div>
+    <p class="hint" style="text-align:center">Версия сайта от 19 октября, №5</p>
   </div>
 </section>
 
@@ -329,7 +339,7 @@ details.more[open] summary{margin-bottom:10px}
   function refreshSetup(){ $("setupCard").hidden=hasModel(); }
   ["lang","mode","key","base","fmt","model"].forEach(id=>$(id).addEventListener("change",()=>{
     store.set(id,$(id).value.trim()); refreshSetup();
-    if(id==="lang"&&listening&&rec) rec.stop();
+    if(id==="lang"&&listening) engineRestart();
   }));
   refreshSetup();
 
@@ -386,7 +396,13 @@ details.more[open] summary{margin-bottom:10px}
     const t=document.createElement("span"); t.className="t"; t.textContent=time;
     const x=document.createElement("span"); x.className="txt"; x.textContent=text;
     row.append(t,x);
-    const ask=()=>{ if(window.getSelection && String(window.getSelection()).length) return; if(!row.dataset.asked) answer([item],"manual"); };
+    const ask=()=>{
+      if(window.getSelection && String(window.getSelection()).length) return;
+      if(row.dataset.asked) return;
+      const parts=splitQuestions(item.text);
+      if(parts && transcript.includes(item)){ const fresh=replaceItem(item,parts); saveSoon(); fresh.forEach(f=>answer([f],"manual")); return; }
+      answer([item],"manual");
+    };
     row.addEventListener("click",ask);
     row.addEventListener("keydown",e=>{ if(e.key==="Enter") ask(); });
     return item;
@@ -423,6 +439,42 @@ details.more[open] summary{margin-bottom:10px}
     const u=makeAnswerBox(item); if(m) setAnswer(u,m[1],m[2]); else u.body.textContent=text;
   }
 
+  // ---- Несколько вопросов в одной фразе ----
+  // «когда появился Китай и когда появилась Россия» → два вопроса. Режем перед «и/а»,
+  // за которыми идёт вопросительное слово, если вопрос в фразе уже был раньше.
+  const SPLIT_Q=new Set(("что чего чему чем как какой какая какое какие каков какова почему зачем когда где куда откуда кто кого кому сколько чей чья чьё чьи "+
+    "объясните объясни расскажите расскажи назовите назови what why how when where who which هل ما ماذا لماذا كيف متى أين من كم").split(" "));
+  const SPLIT_JOIN=new Set(["и","а","and","و"]);
+  const PREP=new Set("в во на с со о об по за из у к ко от до для при через про над под".split(" "));
+  const QFORM=/^(как(ой|ая|ое|ие|ого|ому|им|ом|ую|их|ими|ова|ово|овы)|кем|ком|чём|скольк\p{L}+|чьего|чьей|чьему|чьих)$/u;
+  function splitQuestions(text){
+    const w=text.split(/\s+/).filter(Boolean), n=w.map(x=>x.toLowerCase().replace(/ё/g,"е").replace(/[^\p{L}]/gu,""));
+    const cuts=[]; let seenQ=false;
+    for(let i=0;i<n.length;i++){
+      if(SPLIT_Q.has(n[i]) || QFORM.test(n[i])){
+        // «и когда…», а также «и в каком…», «и с кем…» — с предлогом между «и» и вопросом
+        const j=(i>0&&SPLIT_JOIN.has(n[i-1]))?i-1:(i>1&&PREP.has(n[i-1])&&SPLIT_JOIN.has(n[i-2]))?i-2:-1;
+        if(seenQ && j>=0 && j-(cuts.length?cuts[cuts.length-1]:0)>=2) cuts.push(j);
+        seenQ=true;
+      }
+    }
+    if(!cuts.length) return null;
+    const parts=[]; let from=0;
+    for(const c of cuts){ parts.push(w.slice(from,c).join(" ")); from=c+1; }
+    parts.push(w.slice(from).join(" "));
+    return parts.filter(Boolean).length>=2?parts.filter(Boolean):null;
+  }
+  // Заменяет строку в ленте и в расшифровке несколькими строками.
+  function replaceItem(item,texts){
+    const idx=transcript.indexOf(item); if(idx<0) return [item];
+    const fresh=texts.map(t=>createLineItem(item.time,t));
+    let anchor=item.row;
+    fresh.forEach(f=>{ anchor.after(f.row); anchor=f.row; });
+    item.row.remove();
+    transcript.splice(idx,1,...fresh);
+    return fresh;
+  }
+
   // ---- Склейка речи по паузам ----
   // Строки копятся, пока человек говорит. После паузы кусок оценивается целиком:
   // так склеиваются разорванные вопросы и варианты ответа.
@@ -436,6 +488,16 @@ details.more[open] summary{margin-bottom:10px}
     const mode=$("mode").value;
     if(mode==="manual") return;
     if(!hasModel()){ showNote("Ответы выключены: добавьте ключ API в настройках.",6000); return; }
+    // если в одной из строк несколько вопросов — режем её и спрашиваем про каждый отдельно
+    const si=items.findIndex(it=>splitQuestions(it.text));
+    if(si>=0){
+      const parts=replaceItem(items[si],splitQuestions(items[si].text));
+      const before=items.slice(0,si), after=items.slice(si+1);
+      const groups=parts.map((p,j)=>[...(j===0?before:[]),p,...(j===parts.length-1?after:[])]);
+      saveSoon();
+      groups.forEach(g=>answer(g, mode==="all"?"all":"auto"));
+      return;
+    }
     const own=items.map(i=>i.text).join(" ");
     const looks=maybeQuestion(own)||hasOptions(own);
     const idx=transcript.indexOf(items[0]);
@@ -502,7 +564,7 @@ details.more[open] summary{margin-bottom:10px}
     const done=answeredLog.length?"<уже_отвечено>\n"+answeredLog.join("\n")+"\n</уже_отвечено>\n\n":"";
     const common="Ты слушаешь живую речь (лекцию, разговор, устный тест) через диктофон и подсказываешь ответы. Распознавание не ставит знаков препинания, может ошибаться в словах и резать фразы в случайных местах: начало вопроса может оказаться в одной строке, а продолжение в следующей.\n\n<расшифровка>\n"+context+"\n</расшифровка>\n\n"+done;
     const rules="- Если в нём есть вопрос (прямой, косвенный или задание вроде «объясните…», «назовите…»), ответь на него точно, в 1–4 предложениях. Если начало вопроса было в предыдущих строках расшифровки, склей их.\n- Если это вопрос с вариантами ответа (а/б/в, первый/второй, «X или Y», «верно или неверно»), начни ответ с правильного варианта, например «Ответ: б) Париж», и добавь одно предложение, почему.\n- Если фрагмент содержит варианты ответа или уточнение к вопросу, который прозвучал раньше, ответь на весь вопрос целиком с учётом вариантов, даже если на него уже отвечали без них.\n- Если во фрагменте несколько разных вопросов, ответь на каждый отдельно.\n";
-    const format="\nФормат ответа строго такой, по паре строк на каждый вопрос, в том порядке, в котором вопросы прозвучали:\n? <слова, с которых начинается вопрос, точно как они записаны во фрагменте>\n= <ответ>\nНичего, кроме этих строк, не пиши.";
+    const format="\nФормат ответа строго такой, по паре строк на каждый вопрос, в том порядке, в котором вопросы прозвучали:\n? <слова, с которых начинается вопрос, точно как они записаны во фрагменте>\n= <ответ>\nНичего, кроме этих строк, не пиши. Пример для фрагмента «итак какая столица франции и сколько будет два плюс два»:\n? какая столица франции\n= Париж.\n? сколько будет два плюс два\n= Четыре.";
     let prompt;
     if(kind==="manual"){
       prompt=common+"Пользователь сам отметил строку: «"+fragment+"». Вопрос может начинаться в предыдущей строке расшифровки или продолжаться в следующей.\n\nПравила:\n"+rules+"- Если вопроса нет, напиши одну строку «= » с коротким полезным комментарием.\n"+format+"\nОтвечай на языке фрагмента, без вступлений.";
@@ -889,6 +951,21 @@ details.more[open] summary{margin-bottom:10px}
   };
 
   // ---- Запись ----
+  // На iPhone распознавание иногда «зависает»: микрофон включён, а текст не приходит,
+  // или фраза так и не получает статус «готово». Поэтому:
+  //  • после каждой остановки создаём новый распознаватель, а не перезапускаем старый;
+  //  • события от старых распознавателей игнорируем;
+  //  • если фраза висит без изменений 1,8 с, записываем её сами;
+  //  • если микрофон не включился или речь идёт, а текста нет, тихо перезапускаем.
+  const isIOS=/iP(hone|ad|od)/.test(navigator.userAgent)||(navigator.platform==="MacIntel"&&navigator.maxTouchPoints>1);
+  if(isIOS){
+    const standalone=window.navigator.standalone===true||matchMedia("(display-mode: standalone)").matches;
+    $("micHelp").hidden=false;
+    $("micMode").textContent=standalone
+      ?"Сайт открыт как приложение с главного экрана. В этом режиме iPhone спрашивает доступ к микрофону при каждом запуске, и отключить это нельзя. Если вопрос мешает, открывайте сайт в Safari: там разрешение можно дать навсегда."
+      :"Сайт открыт в Safari. Разрешение на микрофон можно дать навсегда, тогда вопрос больше не появится.";
+  }
+  let gen=0, committed=[], latest=[], stallTimer=null, watchTimer=null, restartTimer=null;
   function setState(on){
     listening=on; app.classList.toggle("on",on);
     $("recLabel").textContent=on?"Стоп":"Слушать";
@@ -896,27 +973,83 @@ details.more[open] summary{margin-bottom:10px}
     if(!on) interimEl.textContent="";
     else if(!interimEl.textContent) interimEl.textContent="Слушаю…";
   }
-  function start(){
-    rec=new SR();
-    rec.lang=$("lang").value; rec.continuous=true; rec.interimResults=true;
-    rec.onresult=e=>{
-      let interim="";
-      for(let i=e.resultIndex;i<e.results.length;i++){
-        const r=e.results[i];
-        if(r.isFinal){ const s=r[0].transcript.trim(); if(s) addLine(s); }
-        else interim+=r[0].transcript;
-      }
-      interimEl.textContent=interim||"Слушаю…";
-      if(interim.trim() && pending.length) schedule();
-    };
-    rec.onerror=e=>{
-      if(e.error==="not-allowed"||e.error==="service-not-allowed"){ showNote("Нет доступа к микрофону. Разрешите его для этого сайта в настройках браузера."); setState(false); }
-      else if(e.error==="network"){ showNote("Для распознавания речи нужен интернет.",6000); }
-    };
-    rec.onend=()=>{ if(listening){ try{ rec.start(); }catch(_){ setTimeout(()=>listening&&start(),300); } } };
-    try{ rec.start(); showNote(""); setState(true); }catch(e){ showNote("Не удалось включить микрофон."); }
+  // Часть фразы, которую ещё не записали в ленту.
+  function unsent(c,text){
+    if(!c) return text;
+    if(text.startsWith(c.t)) return text.slice(c.t.length);
+    if(c.final) return text; // законченная фраза не меняется: другой текст — значит, новая фраза
+    const dw=c.t.trim().split(/\s+/).length;   // фразу поправили на ходу: берём слова после уже записанных
+    return text.trim().split(/\s+/).slice(dw).join(" ");
   }
-  $("rec").onclick=()=>{ if(listening){ setState(false); rec&&rec.stop(); setTimeout(flush,600); } else start(); };
+  function commitStale(){
+    stallTimer=null;
+    if(!listening) return;
+    latest.forEach((t,i)=>{
+      if(t==null) return;
+      const rest=unsent(committed[i],t).trim();
+      if(rest){ addLine(rest); committed[i]={t,final:false}; }
+    });
+    interimEl.textContent="Слушаю…";
+  }
+  function engineStart(){
+    clearTimeout(restartTimer); clearTimeout(watchTimer); clearTimeout(stallTimer);
+    const my=++gen; committed=[]; latest=[];
+    let r;
+    try{ r=new SR(); }catch(e){ showNote("Не удалось включить распознавание речи."); setState(false); return; }
+    rec=r;
+    r.lang=$("lang").value; r.continuous=true; r.interimResults=true; r.maxAlternatives=1;
+    let audio=false;
+    const alive=()=>my===gen&&listening;
+    r.onaudiostart=()=>{ if(!alive()) return; audio=true; };
+    r.onspeechstart=()=>{ if(!alive()) return;
+      // речь идёт, а текста нет 8 с — распознаватель завис
+      clearTimeout(watchTimer); watchTimer=setTimeout(()=>{ if(alive()&&!latest.length) engineRestart(); },8000);
+    };
+    r.onresult=e=>{
+      if(!alive()) return;
+      clearTimeout(watchTimer);
+      let interim="";
+      for(let i=0;i<e.results.length;i++){
+        const res=e.results[i], t=res[0].transcript;
+        if(res.isFinal){
+          const rest=unsent(committed[i],t).trim();
+          if(rest) addLine(rest);
+          committed[i]={t,final:true}; latest[i]=null;
+        }else{
+          latest[i]=t;
+          interim+=unsent(committed[i],t);
+        }
+      }
+      interimEl.textContent=interim.trim()||"Слушаю…";
+      clearTimeout(stallTimer);
+      if(interim.trim()){ stallTimer=setTimeout(commitStale,1800); if(pending.length) schedule(); }
+    };
+    r.onerror=e=>{
+      if(my!==gen) return;
+      if(e.error==="not-allowed"||e.error==="service-not-allowed"){
+        showNote(isIOS?"Нет доступа к микрофону или распознаванию речи. Разрешите их: Настройки → Конфиденциальность → Микрофон и Распознавание речи → Safari.":"Нет доступа к микрофону. Разрешите его для этого сайта в настройках браузера.");
+        setState(false);
+      }else if(e.error==="network"){ showNote("Для распознавания речи нужен интернет.",6000); }
+      else if(e.error==="audio-capture"){ showNote("Микрофон занят другим приложением.",6000); }
+    };
+    r.onend=()=>{
+      if(my!==gen) return;
+      commitStale();
+      if(listening) restartTimer=setTimeout(()=>{ if(listening) engineStart(); },isIOS?150:60);
+    };
+    try{ r.start(); }catch(e){ restartTimer=setTimeout(()=>{ if(listening) engineStart(); },400); return; }
+    // микрофон так и не включился за 4 с — пробуем заново
+    watchTimer=setTimeout(()=>{ if(alive()&&!audio&&!latest.length) engineRestart(); },4000);
+  }
+  function engineRestart(){ const old=rec; gen++; try{ old&&old.abort(); }catch(_){} if(listening) engineStart(); }
+  function startListening(){ showNote(""); setState(true); engineStart(); }
+  function stopListening(){
+    setState(false); clearTimeout(restartTimer); clearTimeout(watchTimer); clearTimeout(stallTimer);
+    commitStaleNow(); const old=rec; gen++; try{ old&&old.stop(); }catch(_){} rec=null;
+    setTimeout(flush,400);
+  }
+  function commitStaleNow(){ const was=listening; listening=true; commitStale(); listening=was; }
+  $("rec").onclick=()=>{ if(listening) stopListening(); else startListening(); };
   const doNew=()=>{ newChat(); closeSheets(); showNote("Начат новый чат",2000); };
   $("newBtn").onclick=doNew; $("newBtn2").onclick=doNew;
   $("copy").onclick=async()=>{
@@ -971,7 +1104,7 @@ details.more[open] summary{margin-bottom:10px}
   window.addEventListener("pagehide",()=>{ saveNow(); flushPush(); });
   document.addEventListener("visibilitychange",()=>{
     if(document.visibilityState==="hidden"){ saveNow(); flushPush(); }
-    else{ if(user) pullAll(); if(listening&&rec){ try{ rec.start(); }catch(_){} } }
+    else{ if(user) pullAll(); if(listening) engineRestart(); }
   });
   { const last=chats.find(c=>c.id===store.get("current",""));
     if(last) renderChat(last); else newChat(); }
