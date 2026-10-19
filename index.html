@@ -254,7 +254,14 @@ summary{padding:10px 14px;cursor:pointer;font-weight:500}
       prompt=common+"Новый фрагмент речи: «"+fragment+"».\n\nПравила:\n"+rules+"- Если вопрос явно оборван на полуслове и его продолжение ещё не прозвучало, ответь ровно одним символом: …\n- Если вопроса нет (например, «когда я был студентом…», «я не знаю, где он») или на него уже ответили и ничего нового не прозвучало, ответь ровно одним символом: —\nОтвечай на языке фрагмента, без вступлений.";
     }
     try{
-      const text=(await callModel(prompt)||"").trim();
+      // Пока модель пишет, показываем текст сразу. В режиме «только вопросы»
+      // ждём первые буквы, чтобы не мигать служебными «—» и «…».
+      const noise=/^[\s—–\-.…]*$/;
+      const text=(await callModel(prompt,t=>{
+        if(kind==="auto" && noise.test(t)) return;
+        box.className="answer"; body.textContent=t;
+        if(tape.scrollHeight-tape.scrollTop-tape.clientHeight<120) scrollDown();
+      })||"").trim();
       if(kind==="auto" && /^(…|\.{3})$/.test(text)){ box.remove(); release("incomplete"); return; }
       if(kind==="auto" && /^[\s—–\-.]*$/.test(text)){ box.remove(); release("rejected"); return; }
       group.forEach(i=>{i.status="answered"; i.row.classList.add("q");});
@@ -289,29 +296,61 @@ summary{padding:10px 14px;cursor:pointer;font-weight:500}
     return new Error("Ошибка API: "+(typeof m==="string"?m:JSON.stringify(m)));
   }
   async function post(url,c,body){
-    let r;
-    try{ r=await fetch(url,{method:"POST",headers:headers(c),body:JSON.stringify(body)}); }
+    try{ return await fetch(url,{method:"POST",headers:headers(c),body:JSON.stringify(body)}); }
     catch(e){ throw new Error("Сервер не отвечает или не принимает запросы из браузера. Нажмите на строку ещё раз, чтобы повторить."); }
-    const data=await r.json().catch(()=>({}));
-    return {r,data};
   }
-  async function callModel(prompt){
+  function textFromJson(fmt,data){
+    if(fmt==="anthropic") return (data.content||[]).filter(x=>x.type==="text").map(x=>x.text).join("\n");
+    const msg=data.choices&&data.choices[0]&&data.choices[0].message;
+    const content=msg&&msg.content;
+    return Array.isArray(content)?content.map(p=>p.text||"").join(""):(content||"");
+  }
+  // Читает ответ по кусочкам (SSE) и сообщает весь текст на каждом шаге.
+  async function readStream(r,fmt,onText){
+    const ct=r.headers.get("content-type")||"";
+    if(!/event-stream/i.test(ct) || !r.body){
+      const data=await r.json().catch(()=>({}));
+      const t=textFromJson(fmt,data); onText&&onText(t); return t;
+    }
+    const reader=r.body.getReader(), dec=new TextDecoder();
+    let buf="", text="";
+    for(;;){
+      const {value,done}=await reader.read();
+      if(done) break;
+      buf+=dec.decode(value,{stream:true});
+      const lines=buf.split(/\r?\n/); buf=lines.pop();
+      for(const line of lines){
+        if(!line.startsWith("data:")) continue;
+        const payload=line.slice(5).trim();
+        if(!payload || payload==="[DONE]") continue;
+        let ev; try{ ev=JSON.parse(payload); }catch(_){ continue; }
+        if(ev.error) throw new Error("Ошибка API: "+(ev.error.message||JSON.stringify(ev.error)));
+        let d="";
+        if(fmt==="anthropic"){ if(ev.type==="content_block_delta" && ev.delta && ev.delta.text) d=ev.delta.text; }
+        else { const ch=ev.choices&&ev.choices[0]; d=(ch&&ch.delta&&ch.delta.content)||""; }
+        if(d){ text+=d; onText&&onText(text); }
+      }
+    }
+    return text;
+  }
+  async function callModel(prompt,onText){
     const c=cfg();
     if(!c.model) throw new Error("Укажите модель в настройках (кнопка «Проверить» покажет список).");
     const messages=[{role:"user",content:prompt}];
     if(c.fmt==="anthropic"){
-      const {r,data}=await post(c.base+"/messages",c,{model:c.model,max_tokens:400,messages});
-      if(!r.ok) throw apiError(r.status,data);
-      return (data.content||[]).filter(x=>x.type==="text").map(x=>x.text).join("\n").trim();
+      const r=await post(c.base+"/messages",c,{model:c.model,max_tokens:400,stream:true,messages});
+      if(!r.ok) throw apiError(r.status,await r.json().catch(()=>({})));
+      return (await readStream(r,"anthropic",onText)).trim();
     }
-    let {r,data}=await post(c.base+"/chat/completions",c,{model:c.model,max_tokens:400,messages});
-    if(!r.ok && r.status===400 && /max_tokens/i.test(JSON.stringify(data))){
-      ({r,data}=await post(c.base+"/chat/completions",c,{model:c.model,max_completion_tokens:400,messages}));
+    const url=c.base+"/chat/completions";
+    let r=await post(url,c,{model:c.model,max_tokens:400,stream:true,messages});
+    if(!r.ok && r.status===400){
+      const data=await r.json().catch(()=>({}));
+      if(!/max_tokens/i.test(JSON.stringify(data))) throw apiError(400,data);
+      r=await post(url,c,{model:c.model,max_completion_tokens:400,stream:true,messages});
     }
-    if(!r.ok) throw apiError(r.status,data);
-    const msg=data.choices&&data.choices[0]&&data.choices[0].message;
-    const content=msg&&msg.content;
-    return (Array.isArray(content)?content.map(p=>p.text||"").join(""):content||"").trim();
+    if(!r.ok) throw apiError(r.status,await r.json().catch(()=>({})));
+    return (await readStream(r,"openai",onText)).trim();
   }
 
   $("check").onclick=async()=>{
