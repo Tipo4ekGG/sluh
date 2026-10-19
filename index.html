@@ -65,6 +65,18 @@ summary{padding:10px 14px;cursor:pointer;font-weight:500}
 .answer.err{color:var(--rec)}
 .interim{color:var(--muted);font-style:italic;padding:4px 8px 4px 70px;min-height:1.5em}
 .note{font-size:13px;color:var(--rec);padding-bottom:8px}
+.chats{border:1px solid var(--line);border-radius:10px;background:var(--surface);margin-bottom:12px;padding:12px 14px;display:grid;gap:10px;max-height:55vh;overflow-y:auto}
+.chats-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.chats ul{list-style:none;margin:0;padding:0;display:grid;gap:6px}
+.chat-item{display:flex;align-items:stretch;border:1px solid var(--line);border-radius:8px;background:var(--bg);min-width:0}
+.chat-item.cur{border-color:var(--accent)}
+.chat-open{flex:1;min-width:0;text-align:left;background:none;border:0;padding:8px 10px;cursor:pointer;display:grid;gap:2px;color:inherit;font:inherit}
+.chat-title{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chat-meta{font:12px var(--font-mono);color:var(--muted);font-variant-numeric:tabular-nums}
+.chat-act{background:none;border:0;border-left:1px solid var(--line);padding:0 10px;cursor:pointer;color:var(--muted);font:13px var(--font-body)}
+.chat-act.danger{color:var(--rec)}
+.chat-open:focus-visible,.chat-act:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.btn.small{padding:6px 10px;font-size:13px}
 @media (max-width:420px){.line{grid-template-columns:44px 1fr}.answer{margin-left:0}.interim{padding-left:8px}}
 </style>
 </head>
@@ -77,9 +89,16 @@ summary{padding:10px 14px;cursor:pointer;font-weight:500}
 
   <div class="controls">
     <button class="btn primary" id="toggle">Начать слушать</button>
-    <button class="btn" id="clear">Очистить</button>
-    <button class="btn" id="copy">Скопировать всё</button>
+    <button class="btn" id="chatsBtn">Чаты</button>
+    <button class="btn" id="clear">Новый чат</button>
+    <button class="btn" id="copy">Скопировать</button>
   </div>
+
+  <section class="chats" id="chats" hidden>
+    <div class="chats-head"><strong>Чаты</strong><button class="btn small" id="closeChats" type="button">Закрыть</button></div>
+    <ul id="chatList"></ul>
+    <p class="hint">Каждый чат сохраняется сам. История хранится только в этом браузере: на другом устройстве её не будет, а очистка данных браузера её удалит.</p>
+  </section>
 
   <details id="settingsBox">
     <summary>Настройки</summary>
@@ -190,12 +209,12 @@ summary{padding:10px 14px;cursor:pointer;font-weight:500}
     return /\s[аa][\s).]/.test(t) && /\s[бbв][\s).]/.test(t);
   }
 
-  function addLine(text){
+  function renderLine(time,text){
     emptyEl.hidden=true;
     const row=document.createElement("div");
     row.className="line"; row.tabIndex=0; row.title="Нажмите, чтобы получить ответ";
-    const item={time:clock(),text,row,status:null};
-    transcript.push(item); pending.push(item);
+    const item={time,text,row,status:null,answers:[]};
+    transcript.push(item);
     const t=document.createElement("span"); t.className="t"; t.textContent=item.time;
     const x=document.createElement("span"); x.className="txt"; x.textContent=text;
     row.append(t,x);
@@ -204,8 +223,12 @@ summary{padding:10px 14px;cursor:pointer;font-weight:500}
     row.addEventListener("click",ask);
     row.addEventListener("keydown",e=>{if(e.key==="Enter")ask();});
     if(isQuestion(text)) row.classList.add("q");
-    schedule();
-    scrollDown();
+    return item;
+  }
+  function addLine(text){
+    const item=renderLine(clock(),text);
+    pending.push(item);
+    schedule(); saveSoon(); scrollDown();
   }
 
   function schedule(){ clearTimeout(flushTimer); flushTimer=setTimeout(flush,PAUSE_MS); }
@@ -268,10 +291,95 @@ summary{padding:10px 14px;cursor:pointer;font-weight:500}
       box.className="answer";
       body.textContent=text||"(пустой ответ)";
       answeredLog.push(fragment.slice(0,200)); if(answeredLog.length>6) answeredLog.shift();
+      last.answers=(last.answers||[]).concat(text); saveSoon();
     }catch(e){
       box.className="answer err"; body.textContent=e.message; release(null);
     }
     scrollDown();
+  }
+
+  // ---- История чатов: каждый чат — одна сессия, всё хранится в этом браузере ----
+  const MAX_CHATS=100;
+  let chats=loadChats(), current=null, saveTimer=null;
+  function loadChats(){ try{ const v=JSON.parse(localStorage.getItem("sl_chats")||"[]"); return Array.isArray(v)?v:[]; }catch(e){ return []; } }
+  function persist(){ try{ localStorage.setItem("sl_chats",JSON.stringify(chats)); }catch(e){ showNote("Не удалось сохранить историю: в браузере кончилось место. Удалите старые чаты."); } }
+  function autoTitle(){
+    const a=transcript.find(i=>i.answers&&i.answers.length);
+    const src=((a||transcript[0]||{}).text)||"Без названия";
+    return src.length>48?src.slice(0,48)+"…":src;
+  }
+  function saveSoon(){ clearTimeout(saveTimer); saveTimer=setTimeout(saveNow,400); }
+  function saveNow(){
+    clearTimeout(saveTimer);
+    if(!current) return;
+    current.lines=transcript.map(i=>({time:i.time,text:i.text,status:i.status==="answered"?"answered":null,answers:i.answers||[]}));
+    if(!current.lines.length) return;
+    current.updated=Date.now();
+    current.title=autoTitle();
+    if(!chats.includes(current)){ chats.unshift(current); if(chats.length>MAX_CHATS) chats.length=MAX_CHATS; }
+    persist(); renderChatList();
+  }
+  function resetTape(){
+    clearTimeout(flushTimer); pending=[]; answeredLog=[]; transcript.length=0;
+    tape.querySelectorAll(".line,.answer").forEach(n=>n.remove()); emptyEl.hidden=false;
+  }
+  function newChat(){
+    saveNow(); resetTape();
+    current={id:Date.now().toString(36)+Math.random().toString(36).slice(2,6),created:Date.now(),updated:Date.now(),lines:[]};
+    store.set("current",current.id); renderChatList();
+  }
+  function openChat(id){
+    const c=chats.find(x=>x.id===id); if(!c) return;
+    saveNow(); resetTape(); current=c; store.set("current",c.id);
+    for(const l of c.lines||[]){
+      const item=renderLine(l.time,l.text);
+      item.status=l.status||null; item.answers=(l.answers||[]).slice();
+      if(item.status==="answered") item.row.classList.add("q");
+      item.answers.forEach(a=>renderAnswerBox(item,a));
+      if(item.answers.length){ answeredLog.push(l.text.slice(0,200)); if(answeredLog.length>6) answeredLog.shift(); }
+    }
+    renderChatList(); $("chats").hidden=true; scrollDown();
+  }
+  function chatText(c){
+    const head=(c.title||"Чат")+"\n"+new Date(c.created).toLocaleString("ru-RU")+"\n\n";
+    return head+(c.lines||[]).map(l=>"["+l.time+"] "+l.text+(l.answers||[]).map(a=>"\n  → "+a.replace(/\n/g,"\n    ")).join("")).join("\n");
+  }
+  function downloadChat(c){
+    const d=new Date(c.created), p=n=>String(n).padStart(2,"0");
+    const name="slushatel-"+d.getFullYear()+"-"+p(d.getMonth()+1)+"-"+p(d.getDate())+"-"+p(d.getHours())+p(d.getMinutes())+".txt";
+    const url=URL.createObjectURL(new Blob([chatText(c)],{type:"text/plain;charset=utf-8"}));
+    const a=document.createElement("a"); a.href=url; a.download=name; document.body.append(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url),2000);
+  }
+  function fmtDate(ts){ return new Date(ts).toLocaleString("ru-RU",{day:"numeric",month:"short",hour:"2-digit",minute:"2-digit"}); }
+  function renderChatList(){
+    const ul=$("chatList"); ul.textContent="";
+    $("chatsBtn").textContent="Чаты"+(chats.length?" ("+chats.length+")":"");
+    if(!chats.length){ const li=document.createElement("li"); li.className="hint"; li.textContent="Пока пусто. Начните слушать, и чат сохранится сам."; ul.append(li); return; }
+    for(const c of chats){
+      const li=document.createElement("li"); li.className="chat-item"+(c===current?" cur":"");
+      const open=document.createElement("button"); open.className="chat-open"; open.type="button";
+      const title=document.createElement("span"); title.className="chat-title"; title.textContent=c.title||"Без названия";
+      const n=(c.lines||[]).length, a=(c.lines||[]).reduce((s,l)=>s+((l.answers||[]).length),0);
+      const meta=document.createElement("span"); meta.className="chat-meta"; meta.textContent=fmtDate(c.created)+" · реплик: "+n+" · ответов: "+a+(c===current?" · открыт":"");
+      open.append(title,meta); open.onclick=()=>openChat(c.id);
+      const dl=document.createElement("button"); dl.className="chat-act"; dl.type="button"; dl.textContent="Скачать"; dl.onclick=()=>downloadChat(c);
+      const del=document.createElement("button"); del.className="chat-act danger"; del.type="button"; del.textContent="Удалить";
+      del.onclick=()=>{
+        if(!del.dataset.armed){ del.dataset.armed="1"; del.textContent="Точно?"; setTimeout(()=>{delete del.dataset.armed; del.textContent="Удалить";},3000); return; }
+        chats=chats.filter(x=>x!==c); persist();
+        if(c===current){ current=null; newChat(); } else renderChatList();
+      };
+      li.append(open,dl,del); ul.append(li);
+    }
+  }
+  function renderAnswerBox(item,text){
+    const box=document.createElement("div"); box.className="answer";
+    box.innerHTML='<span class="who">ответ</span>';
+    const body=document.createElement("span"); body.textContent=text; box.append(body);
+    let anchor=item.row;
+    while(anchor.nextElementSibling && anchor.nextElementSibling.classList.contains("answer")) anchor=anchor.nextElementSibling;
+    anchor.after(box);
   }
 
   function cfg(){
@@ -399,12 +507,19 @@ summary{padding:10px 14px;cursor:pointer;font-weight:500}
   }
 
   $("toggle").onclick=()=>{ if(listening){setState(false); rec&&rec.stop(); setTimeout(flush,600);} else start(); };
-  $("clear").onclick=()=>{ transcript.length=0; pending=[]; answeredLog=[]; clearTimeout(flushTimer); tape.querySelectorAll(".line,.answer").forEach(n=>n.remove()); emptyEl.hidden=false; };
+  $("clear").onclick=()=>newChat();
+  $("chatsBtn").onclick=()=>{ saveNow(); renderChatList(); $("chats").hidden=!$("chats").hidden; };
+  $("closeChats").onclick=()=>{ $("chats").hidden=true; };
   $("copy").onclick=async()=>{
-    const out=[...tape.querySelectorAll(".line,.answer")].map(n=>n.classList.contains("answer")?"  → "+n.querySelector("span:last-child").textContent:n.textContent.replace(/^(\d\d:\d\d)/,"[$1] ")).join("\n");
+    saveNow();
+    const out=current&&current.lines.length?chatText(current):"";
     try{await navigator.clipboard.writeText(out); $("copy").textContent="Скопировано";}catch(e){$("copy").textContent="Не вышло";}
-    setTimeout(()=>$("copy").textContent="Скопировать всё",1500);
+    setTimeout(()=>$("copy").textContent="Скопировать",1500);
   };
+  window.addEventListener("pagehide",saveNow);
+  { const last=chats.find(c=>c.id===store.get("current",""));
+    if(last) openChat(last.id); else newChat(); }
+  document.addEventListener("visibilitychange",()=>{ if(document.visibilityState==="hidden") saveNow(); });
   document.addEventListener("visibilitychange",()=>{ if(document.visibilityState==="visible"&&listening&&rec){ try{rec.start();}catch(_){} } });
 })();
 </script>
