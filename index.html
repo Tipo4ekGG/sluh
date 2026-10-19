@@ -312,7 +312,7 @@ details.more[open] summary{margin-bottom:10px}
         <p class="hint">Ключ хранится только на этом устройстве и в облако не попадает.</p>
       </div>
     </div>
-    <p class="hint" style="text-align:center">Версия сайта от 19 октября, №5</p>
+    <p class="hint" style="text-align:center">Версия сайта от 19 октября, №6</p>
   </div>
 </section>
 
@@ -339,7 +339,7 @@ details.more[open] summary{margin-bottom:10px}
   function refreshSetup(){ $("setupCard").hidden=hasModel(); }
   ["lang","mode","key","base","fmt","model"].forEach(id=>$(id).addEventListener("change",()=>{
     store.set(id,$(id).value.trim()); refreshSetup();
-    if(id==="lang"&&listening) engineRestart();
+    if(id==="lang"&&engineOn) engineRestart();
   }));
   refreshSetup();
 
@@ -965,13 +965,14 @@ details.more[open] summary{margin-bottom:10px}
       ?"Сайт открыт как приложение с главного экрана. В этом режиме iPhone спрашивает доступ к микрофону при каждом запуске, и отключить это нельзя. Если вопрос мешает, открывайте сайт в Safari: там разрешение можно дать навсегда."
       :"Сайт открыт в Safari. Разрешение на микрофон можно дать навсегда, тогда вопрос больше не появится.";
   }
-  let gen=0, committed=[], latest=[], stallTimer=null, watchTimer=null, restartTimer=null;
+  let gen=0, committed=[], latest=[], stallTimer=null, watchTimer=null, restartTimer=null, releaseTimer=null;
+  let engineOn=false, lastHeard=0;
+  const RELEASE_MS=90000; // пауза дольше полутора минут — отпускаем микрофон по-настоящему
   function setState(on){
     listening=on; app.classList.toggle("on",on);
     $("recLabel").textContent=on?"Стоп":"Слушать";
     $("rec").setAttribute("aria-label",on?"Остановить запись":"Начать слушать");
-    if(!on) interimEl.textContent="";
-    else if(!interimEl.textContent) interimEl.textContent="Слушаю…";
+    interimEl.textContent=on?"Слушаю…":"";
   }
   // Часть фразы, которую ещё не записали в ленту.
   function unsent(c,text){
@@ -996,18 +997,26 @@ details.more[open] summary{margin-bottom:10px}
     const my=++gen; committed=[]; latest=[];
     let r;
     try{ r=new SR(); }catch(e){ showNote("Не удалось включить распознавание речи."); setState(false); return; }
-    rec=r;
+    rec=r; engineOn=true; lastHeard=Date.now();
     r.lang=$("lang").value; r.continuous=true; r.interimResults=true; r.maxAlternatives=1;
     let audio=false;
-    const alive=()=>my===gen&&listening;
-    r.onaudiostart=()=>{ if(!alive()) return; audio=true; };
-    r.onspeechstart=()=>{ if(!alive()) return;
+    const mine=()=>my===gen;
+    const heard=()=>{ lastHeard=Date.now(); };
+    r.onaudiostart=()=>{ if(mine()){ audio=true; heard(); } };
+    r.onsoundstart=()=>{ if(mine()) heard(); };
+    r.onspeechstart=()=>{ if(!mine()) return; heard();
       // речь идёт, а текста нет 8 с — распознаватель завис
-      clearTimeout(watchTimer); watchTimer=setTimeout(()=>{ if(alive()&&!latest.length) engineRestart(); },8000);
+      clearTimeout(watchTimer); watchTimer=setTimeout(()=>{ if(mine()&&listening&&!latest.some(x=>x!=null)&&Date.now()-lastResult>7000) engineRestart(); },8000);
     };
+    let lastResult=Date.now();
     r.onresult=e=>{
-      if(!alive()) return;
-      clearTimeout(watchTimer);
+      if(!mine()) return;
+      heard(); lastResult=Date.now(); clearTimeout(watchTimer);
+      if(!listening){
+        // на паузе распознавание продолжает работать, но текст не записываем
+        for(let i=0;i<e.results.length;i++) committed[i]={t:e.results[i][0].transcript,final:e.results[i].isFinal};
+        latest=[]; return;
+      }
       let interim="";
       for(let i=0;i<e.results.length;i++){
         const res=e.results[i], t=res[0].transcript;
@@ -1025,30 +1034,58 @@ details.more[open] summary{margin-bottom:10px}
       if(interim.trim()){ stallTimer=setTimeout(commitStale,1800); if(pending.length) schedule(); }
     };
     r.onerror=e=>{
-      if(my!==gen) return;
+      if(!mine()) return;
       if(e.error==="not-allowed"||e.error==="service-not-allowed"){
         showNote(isIOS?"Нет доступа к микрофону или распознаванию речи. Разрешите их: Настройки → Конфиденциальность → Микрофон и Распознавание речи → Safari.":"Нет доступа к микрофону. Разрешите его для этого сайта в настройках браузера.");
-        setState(false);
+        gen++; engineOn=false; setState(false);
       }else if(e.error==="network"){ showNote("Для распознавания речи нужен интернет.",6000); }
       else if(e.error==="audio-capture"){ showNote("Микрофон занят другим приложением.",6000); }
     };
     r.onend=()=>{
-      if(my!==gen) return;
+      if(!mine()) return;
+      engineOn=false;
       commitStale();
-      if(listening) restartTimer=setTimeout(()=>{ if(listening) engineStart(); },isIOS?150:60);
+      // распознаватель закончил сам (тишина, лимит времени) — запускаем новый, только если запись идёт
+      if(listening) restartTimer=setTimeout(()=>{ if(listening&&!engineOn) engineStart(); },isIOS?250:80);
     };
-    try{ r.start(); }catch(e){ restartTimer=setTimeout(()=>{ if(listening) engineStart(); },400); return; }
+    try{ r.start(); }
+    catch(e){ engineOn=false; restartTimer=setTimeout(()=>{ if(listening&&!engineOn) engineStart(); },600); return; }
     // микрофон так и не включился за 4 с — пробуем заново
-    watchTimer=setTimeout(()=>{ if(alive()&&!audio&&!latest.length) engineRestart(); },4000);
+    watchTimer=setTimeout(()=>{ if(mine()&&listening&&!audio&&!latest.some(x=>x!=null)) engineRestart(); },4000);
   }
-  function engineRestart(){ const old=rec; gen++; try{ old&&old.abort(); }catch(_){} if(listening) engineStart(); }
-  function startListening(){ showNote(""); setState(true); engineStart(); }
+  // Перезапуск: сначала гасим старый распознаватель и даём iPhone отпустить микрофон.
+  function engineRestart(){
+    const old=rec; gen++; engineOn=false; rec=null;
+    clearTimeout(watchTimer); clearTimeout(stallTimer);
+    try{ old&&old.abort(); }catch(_){}
+    clearTimeout(restartTimer);
+    restartTimer=setTimeout(()=>{ if(listening&&!engineOn) engineStart(); },600);
+  }
+  function releaseEngine(){
+    clearTimeout(releaseTimer); clearTimeout(watchTimer); clearTimeout(stallTimer); clearTimeout(restartTimer);
+    const old=rec; gen++; engineOn=false; rec=null;
+    try{ old&&old.abort(); }catch(_){}
+  }
+  function startListening(){
+    showNote(""); clearTimeout(releaseTimer);
+    const resume=engineOn&&rec;
+    setState(true);
+    if(resume){
+      // продолжаем на том же распознавателе: без нового запроса микрофона
+      lastHeard=Date.now();
+      clearTimeout(watchTimer);
+      watchTimer=setTimeout(()=>{ if(listening&&Date.now()-lastHeard>7500) engineRestart(); },8000);
+    }else engineStart();
+  }
   function stopListening(){
-    setState(false); clearTimeout(restartTimer); clearTimeout(watchTimer); clearTimeout(stallTimer);
-    commitStaleNow(); const old=rec; gen++; try{ old&&old.stop(); }catch(_){} rec=null;
+    clearTimeout(stallTimer); clearTimeout(watchTimer); clearTimeout(restartTimer);
+    commitStaleNow();
+    setState(false);
+    // мягкая пауза: распознаватель не трогаем, но через 90 с отпускаем микрофон
+    clearTimeout(releaseTimer); releaseTimer=setTimeout(releaseEngine,RELEASE_MS);
     setTimeout(flush,400);
   }
-  function commitStaleNow(){ const was=listening; listening=true; commitStale(); listening=was; }
+  function commitStaleNow(){ const was=listening; listening=true; commitStale(); listening=was; latest=[]; }
   $("rec").onclick=()=>{ if(listening) stopListening(); else startListening(); };
   const doNew=()=>{ newChat(); closeSheets(); showNote("Начат новый чат",2000); };
   $("newBtn").onclick=doNew; $("newBtn2").onclick=doNew;
@@ -1103,8 +1140,8 @@ details.more[open] summary{margin-bottom:10px}
   // ---- Старт ----
   window.addEventListener("pagehide",()=>{ saveNow(); flushPush(); });
   document.addEventListener("visibilitychange",()=>{
-    if(document.visibilityState==="hidden"){ saveNow(); flushPush(); }
-    else{ if(user) pullAll(); if(listening) engineRestart(); }
+    if(document.visibilityState==="hidden"){ saveNow(); flushPush(); if(!listening) releaseEngine(); }
+    else{ if(user) pullAll(); if(listening) engineRestart(); else if(engineOn) releaseEngine(); }
   });
   { const last=chats.find(c=>c.id===store.get("current",""));
     if(last) renderChat(last); else newChat(); }
