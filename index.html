@@ -118,14 +118,14 @@ body{overscroll-behavior-y:none}
   <section class="chats" id="authBox" hidden>
     <div class="chats-head"><strong>Аккаунт</strong><button class="btn small" id="closeAuth" type="button">Закрыть</button></div>
     <form id="authForm" class="settings" style="padding:0">
-      <label>Email
-        <input id="email" type="email" autocomplete="username" required>
+      <label>Логин
+        <input id="email" type="text" autocomplete="username" autocapitalize="off" autocorrect="off" spellcheck="false" required>
       </label>
       <label>Пароль
         <input id="password" type="password" autocomplete="current-password" required>
       </label>
       <button class="btn primary" type="submit" id="signIn">Войти</button>
-      <p class="hint">Входите тем же email и паролем, что в AURA. После входа чаты сохраняются в облаке и обновляются сразу на всех устройствах.</p>
+      <p class="hint">Входите тем же логином и паролем, что в AURA. После входа чаты сохраняются в облаке и обновляются сразу на всех устройствах.</p>
       <p class="hint" id="authMsg" hidden></p>
     </form>
     <div class="auth-out" id="authOut" hidden>
@@ -506,7 +506,7 @@ body{overscroll-behavior-y:none}
   function renderAuth(){
     $("authBtn").textContent=user?"Аккаунт":"Войти";
     $("authForm").hidden=!!user; $("authOut").hidden=!user;
-    if(user) $("whoami").textContent=user.email||"";
+    if(user) $("whoami").textContent=(user.email||"").replace(/@example\.com$/i,"");
     if(!user) setSync(sb?"без входа: только это устройство":"облако недоступно","");
   }
   async function onSignedIn(u){
@@ -525,9 +525,12 @@ body{overscroll-behavior-y:none}
     const msg=$("authMsg"); msg.hidden=false;
     if(!sb){ msg.textContent="Не загрузилась библиотека входа. Обновите страницу."; return; }
     msg.textContent="Вхожу…"; $("signIn").disabled=true;
-    const {data,error}=await sb.auth.signInWithPassword({email:$("email").value.trim(),password:$("password").value});
+    // Как в AURA: логин превращается в служебный адрес логин@example.com
+    const login=$("email").value.trim().toLowerCase();
+    const email=login.includes("@")?login:login+"@example.com";
+    const {data,error}=await sb.auth.signInWithPassword({email,password:$("password").value});
     $("signIn").disabled=false;
-    if(error){ msg.textContent=/invalid/i.test(error.message)?"Неверный email или пароль.":/confirm/i.test(error.message)?"Email не подтверждён. Найдите письмо от Supabase и перейдите по ссылке.":"Не получилось войти: "+error.message; return; }
+    if(error){ msg.textContent=/invalid/i.test(error.message)?"Неверный логин или пароль.":"Не получилось войти: "+error.message; return; }
     msg.hidden=true; $("password").value=""; $("authBox").hidden=true;
     onSignedIn(data.user);
   });
