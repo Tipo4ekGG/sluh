@@ -276,9 +276,18 @@ details.more[open] summary{margin-bottom:10px}
         <label class="field">Способ распознавания
           <select id="asr">
             <option value="browser">Встроенное в браузер — бесплатно</option>
-            <option value="server">Через сервер (Whisper) — точнее, платно</option>
+            <option value="yandex">Yandex SpeechKit — точнее, платно</option>
+            <option value="server">Whisper через ключ модели</option>
           </select>
         </label>
+        <div class="group" id="yaBox">
+          <label class="field">API-ключ Yandex Cloud
+            <input id="yaKey" type="password" autocomplete="off" placeholder="вставьте ключ">
+          </label>
+          <button class="btn" id="yaCheck" type="button">Проверить ключ Яндекса</button>
+          <p class="msg" id="yaMsg" hidden></p>
+          <p class="hint">Ключ хранится только на этом устройстве. Оплата идёт в Yandex Cloud: около 16 копеек за каждые начатые 15 секунд речи. Сайт обрезает тишину и склеивает короткие фразы, чтобы не платить лишнего.</p>
+        </div>
         <div class="group" id="asrBox">
           <label class="field">Модель распознавания
             <input id="asrModel" type="text" autocomplete="off" autocapitalize="off" list="asrModels" placeholder="whisper-1">
@@ -328,7 +337,7 @@ details.more[open] summary{margin-bottom:10px}
         <p class="hint">Ключ хранится только на этом устройстве и в облако не попадает.</p>
       </div>
     </div>
-    <p class="hint" style="text-align:center">Версия сайта от 21 октября, №10</p>
+    <p class="hint" style="text-align:center">Версия сайта от 21 октября, №11</p>
   </div>
 </section>
 
@@ -353,10 +362,11 @@ details.more[open] summary{margin-bottom:10px}
   $("model").value = store.get("model","");
   function hasModel(){ return !!($("key").value.trim() && $("model").value.trim()); }
   function refreshSetup(){ $("setupCard").hidden=hasModel(); }
-  $("asr").value=store.get("asr","browser"); $("asrModel").value=store.get("asrModel","");
-  const showAsr=()=>{ $("asrBox").hidden=$("asr").value!=="server"; $("rec").disabled=$("asr").value==="browser"&&!(window.SpeechRecognition||window.webkitSpeechRecognition); };
+  $("asr").value=store.get("asr","browser"); $("asrModel").value=store.get("asrModel",""); $("yaKey").value=store.get("yaKey","");
+  if(!$("asr").value) $("asr").value="browser";
+  const showAsr=()=>{ const v=$("asr").value; $("asrBox").hidden=v!=="server"; $("yaBox").hidden=v!=="yandex"; $("rec").disabled=v==="browser"&&!(window.SpeechRecognition||window.webkitSpeechRecognition); };
   showAsr();
-  ["asr","asrModel"].forEach(id=>$(id).addEventListener("change",()=>{
+  ["asr","asrModel","yaKey"].forEach(id=>$(id).addEventListener("change",()=>{
     store.set(id,$(id).value.trim()); showAsr();
     if(id==="asr"){ if(listening) stopListening(); releaseEngine(); srvRelease(); showNote("Способ распознавания изменён. Нажмите «Слушать».",4000); }
   }));
@@ -1218,118 +1228,158 @@ details.more[open] summary{margin-bottom:10px}
   }
   function commitStaleNow(){ const was=listening; listening=true; commitStale(); listening=was; latest=[]; }
   $("rec").onclick=()=>{ if(listening) stopListening(); else startListening(); };
-  // ---- Распознавание через сервер (Whisper и подобные) ----
-  // Пишем звук с микрофона, режем по паузам в речи и отправляем каждый кусок
-  // на /audio/transcriptions. Куски распознаются по очереди, чтобы строки шли по порядку.
-  const srv={stream:null,ctx:null,an:null,buf:null,rec:null,speech:false,segStart:0,lastVoice:0,floor:0.004,timer:null,mime:"",queue:Promise.resolve(),busy:0};
-  const asrServer=()=>$("asr").value==="server";
-  function pickMime(){
-    if(!window.MediaRecorder) return null;
-    const c=["audio/webm;codecs=opus","audio/webm","audio/mp4","audio/ogg;codecs=opus"];
-    return c.find(m=>MediaRecorder.isTypeSupported&&MediaRecorder.isTypeSupported(m))||"";
-  }
+  // ---- Распознавание через сервер: Yandex SpeechKit или Whisper ----
+  // Берём звук с микрофона напрямую (16 кГц, 16 бит), сами находим паузы в речи,
+  // обрезаем тишину и отправляем куски по очереди, чтобы строки шли по порядку.
+  const STT_URL="https://btvmezpdhhhmxraqirsc.supabase.co/functions/v1/sluh-stt";
+  const RATE=16000;
+  const srv={stream:null,ctx:null,src:null,proc:null,queue:Promise.resolve(),busy:0,
+    seg:[],segLen:0,pre:[],preLen:0,speech:false,silence:0,floor:0.004,carry:0,acc:0,accN:0};
+  const asrMode=()=>$("asr").value;                 // browser | yandex | server
+  const asrServer=()=>asrMode()!=="browser";
   // Частые «галлюцинации» распознавания на тишине и шуме
   const HALLU=/^(продолжение следует|субтитры|спасибо за (просмотр|внимание)|подписывайтесь|редактор субтитров|thank you|you|\.+|…)[\s.!…]*$/i;
-  function srvNewSegment(){
-    const r=new MediaRecorder(srv.stream, srv.mime?{mimeType:srv.mime}:undefined);
-    const parts=[]; r._send=false;
-    r.ondataavailable=e=>{ if(e.data&&e.data.size) parts.push(e.data); };
-    r.onstop=()=>{ if(r._send) srvEnqueue(new Blob(parts,{type:r.mimeType||srv.mime||"audio/webm"})); };
-    r.start(); srv.rec=r; srv.segStart=Date.now(); srv.speech=false;
-  }
-  // Закрыть текущий кусок (и, если в нём была речь и запись идёт, отправить) и сразу начать новый
-  function srvCut(send){
-    const old=srv.rec; if(!old) return;
-    old._send=!!send && srv.speech;
-    srvNewSegment();
-    try{ old.stop(); }catch(_){}
-  }
-  function srvTick(){
-    if(!srv.an) return;
-    srv.an.getFloatTimeDomainData(srv.buf);
-    let sum=0; for(let i=0;i<srv.buf.length;i++) sum+=srv.buf[i]*srv.buf[i];
-    const rms=Math.sqrt(sum/srv.buf.length), now=Date.now();
-    // уровень фонового шума подстраивается сам
-    if(rms<srv.floor*2.5) srv.floor=srv.floor*0.98+rms*0.02;
-    const voice=rms>Math.max(0.008,srv.floor*3);
-    if(voice){ srv.lastVoice=now; if(!srv.speech){ srv.speech=true; } }
+
+  // Правила нарезки. Яндекс считает деньги за каждые начатые 15 с, поэтому короткие
+  // фразы склеиваем: режем, когда кусок уже не меньше 6 с, или после долгой паузы.
+  const cutRules=()=>asrMode()==="yandex"
+    ? {minLen:6*RATE, pause:0.9*RATE, longPause:1.8*RATE, maxLen:25*RATE}
+    : {minLen:1.2*RATE, pause:0.9*RATE, longPause:1.8*RATE, maxLen:25*RATE};
+
+  function pushSeg(chunk){ srv.seg.push(chunk); srv.segLen+=chunk.length; }
+  function pushPre(chunk){ srv.pre.push(chunk); srv.preLen+=chunk.length; while(srv.preLen>0.4*RATE&&srv.pre.length>1){ srv.preLen-=srv.pre.shift().length; } }
+  function joinPcm(list,len){ const out=new Int16Array(len); let o=0; for(const c of list){ out.set(c,o); o+=c.length; } return out; }
+  // Один блок звука с микрофона: понижаем частоту до 16 кГц и решаем, речь это или тишина
+  function onAudio(input,inRate){
+    const ratio=inRate/RATE, out=[];
+    for(let i=0;i<input.length;i++){
+      srv.acc+=input[i]; srv.accN++; srv.carry+=1;
+      if(srv.carry>=ratio){ srv.carry-=ratio; const v=srv.acc/srv.accN; srv.acc=0; srv.accN=0; out.push(Math.max(-1,Math.min(1,v))); }
+    }
+    if(!out.length) return;
+    const pcm=new Int16Array(out.length); let sum=0;
+    for(let i=0;i<out.length;i++){ pcm[i]=out[i]*32767; sum+=out[i]*out[i]; }
     if(!listening) return;
-    if(srv.speech && now-srv.lastVoice>900 && now-srv.segStart>1200) srvCut(true);   // пауза после фразы
-    else if(srv.speech && now-srv.segStart>25000) srvCut(true);                      // слишком длинный кусок
-    else if(!srv.speech && now-srv.segStart>15000) srvCut(false);                    // долгая тишина: выбрасываем
+    const rms=Math.sqrt(sum/out.length);
+    if(rms<srv.floor*2.5) srv.floor=srv.floor*0.97+rms*0.03;   // фоновый шум подстраивается сам
+    const voice=rms>Math.max(0.008,srv.floor*3);
+    const R=cutRules();
+    if(!srv.speech){
+      if(voice){
+        if(!srv.segLen){ srv.seg=srv.pre.slice(); srv.segLen=srv.preLen; } // начало фразы — с небольшим запасом до неё
+        srv.pre=[]; srv.preLen=0; srv.speech=true; srv.silence=0; pushSeg(pcm);
+      }
+      else{
+        // тишина между фразами: копим её только внутри уже начатого куска
+        if(srv.segLen){ pushSeg(pcm); srv.silence+=pcm.length; if(srv.silence>=R.longPause) srvCut(); }
+        else pushPre(pcm);
+      }
+    }else{
+      pushSeg(pcm);
+      if(voice){ srv.silence=0; }
+      else{
+        srv.silence+=pcm.length;
+        if(srv.silence>=R.pause){ srv.speech=false; if(srv.segLen>=R.minLen) srvCut(); }
+      }
+      if(srv.segLen>=R.maxLen) srvCut();
+    }
     if(!srv.busy) interimEl.textContent=srv.speech?"Слышу речь…":"Слушаю…";
   }
-  function srvEnqueue(blob){ srv.queue=srv.queue.then(()=>srvTranscribe(blob)).catch(()=>{}); }
-  function asrForm(blob){
+  // Отправить накопленный кусок без лишней тишины в конце
+  function srvCut(){
+    if(!srv.segLen){ srv.seg=[]; return; }
+    let pcm=joinPcm(srv.seg,srv.segLen);
+    const tail=Math.max(0,srv.silence-0.3*RATE); if(tail&&tail<pcm.length) pcm=pcm.subarray(0,pcm.length-tail);
+    srv.seg=[]; srv.segLen=0; srv.silence=0; srv.speech=false;
+    if(pcm.length<0.4*RATE) return;
+    srv.queue=srv.queue.then(()=>srvTranscribe(pcm)).catch(()=>{});
+  }
+  function wavFrom(pcm){
+    const b=new ArrayBuffer(44+pcm.length*2), v=new DataView(b);
+    const w=(o,s)=>{for(let i=0;i<s.length;i++)v.setUint8(o+i,s.charCodeAt(i));};
+    w(0,"RIFF");v.setUint32(4,36+pcm.length*2,true);w(8,"WAVE");w(12,"fmt ");v.setUint32(16,16,true);v.setUint16(20,1,true);v.setUint16(22,1,true);
+    v.setUint32(24,RATE,true);v.setUint32(28,RATE*2,true);v.setUint16(32,2,true);v.setUint16(34,16,true);w(36,"data");v.setUint32(40,pcm.length*2,true);
+    new Int16Array(b,44).set(pcm);
+    return new Blob([b],{type:"audio/wav"});
+  }
+  function sttError(status,data){
+    const m=(data&&(data.error_message||(data.error&&data.error.message)))||("код "+status);
+    if(status===401) return new Error("ключ Яндекса не подошёл");
+    if(status===403) return new Error("у ключа нет права на распознавание (нужна роль ai.speechkit-stt.user)");
+    if(status===402||/billing|payment/i.test(m)) return new Error("в Yandex Cloud не подключена оплата");
+    if(status===429) return new Error("слишком много запросов, подождите");
+    return new Error(m);
+  }
+  async function postYandex(pcm){
+    const key=$("yaKey").value.trim(); if(!key) throw new Error("не указан ключ Яндекса");
+    const auth=/^(Api-Key|Bearer) /.test(key)?key:"Api-Key "+key;
+    let r; try{ r=await fetch(STT_URL+"?lang="+encodeURIComponent($("lang").value),{method:"POST",headers:{authorization:auth,"content-type":"application/octet-stream"},body:pcm.buffer.slice(pcm.byteOffset,pcm.byteOffset+pcm.byteLength)}); }
+    catch(e){ throw new Error("сервер не отвечает"); }
+    const data=await r.json().catch(()=>({}));
+    if(!r.ok) throw sttError(r.status,data);
+    return (data.result||"").trim();
+  }
+  async function postWhisper(pcm,prompt){
+    const c=cfg(), h=headers(c); delete h["content-type"]; // границу multipart браузер поставит сам
     const fd=new FormData();
-    const ext=/mp4|aac|m4a/.test(blob.type)?"m4a":/ogg/.test(blob.type)?"ogg":/wav/.test(blob.type)?"wav":"webm";
-    fd.append("file",blob,"speech."+ext);
+    fd.append("file",wavFrom(pcm),"speech.wav");
     fd.append("model",$("asrModel").value.trim()||"whisper-1");
     fd.append("language",$("lang").value.slice(0,2));
     fd.append("response_format","json");
-    return fd;
-  }
-  async function asrPost(fd){
-    const c=cfg(), h=headers(c); delete h["content-type"]; // границу multipart браузер поставит сам
+    if(prompt) fd.append("prompt",prompt); // предыдущие фразы помогают с терминами
     let r; try{ r=await fetch(c.base+"/audio/transcriptions",{method:"POST",headers:h,body:fd}); }
     catch(e){ throw new Error("сервер не отвечает"); }
     const data=await r.json().catch(()=>({}));
     if(!r.ok){ if(r.status===404) throw new Error("сервер не умеет распознавать звук"); throw apiError(r.status,data); }
     return (data.text||"").trim();
   }
-  async function srvTranscribe(blob){
-    if(blob.size<1500) return;
+  async function srvTranscribe(pcm){
     srv.busy++; interimEl.textContent="Распознаю…";
     try{
-      const fd=asrForm(blob);
-      const ctxText=transcript.slice(-5).map(i=>i.text).join(" ").slice(-400);
-      if(ctxText) fd.append("prompt",ctxText); // предыдущие фразы помогают с терминами
-      const t=await asrPost(fd);
+      const prompt=transcript.slice(-5).map(i=>i.text).join(" ").slice(-400);
+      const t=asrMode()==="yandex"?await postYandex(pcm):await postWhisper(pcm,prompt);
       if(t && !HALLU.test(t)) addLine(t);
-    }catch(e){ showNote("Распознавание через сервер: "+e.message+". Переключитесь на встроенное в настройках.",7000); }
+    }catch(e){ showNote("Распознавание: "+e.message+". Проверьте настройки или включите встроенное.",7000); }
     finally{ srv.busy--; if(!srv.busy) interimEl.textContent=listening?"Слушаю…":""; }
   }
   async function srvStart(){
-    if(pickMime()===null){ showNote("Этот браузер не умеет записывать звук. Выберите встроенное распознавание."); setState(false); return; }
     try{
       if(!srv.ctx) srv.ctx=new (window.AudioContext||window.webkitAudioContext)(); // создаём в момент нажатия — так требует iPhone
       if(!srv.stream){
-        srv.stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}});
-        const src=srv.ctx.createMediaStreamSource(srv.stream);
-        srv.an=srv.ctx.createAnalyser(); srv.an.fftSize=1024; srv.buf=new Float32Array(srv.an.fftSize);
-        src.connect(srv.an); srv.mime=pickMime();
+        srv.stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true,channelCount:1}});
+        srv.src=srv.ctx.createMediaStreamSource(srv.stream);
+        srv.proc=srv.ctx.createScriptProcessor(4096,1,1);
+        srv.proc.onaudioprocess=e=>{ onAudio(e.inputBuffer.getChannelData(0),srv.ctx.sampleRate); e.outputBuffer.getChannelData(0).fill(0); };
+        srv.src.connect(srv.proc); srv.proc.connect(srv.ctx.destination);
       }
       if(srv.ctx.state==="suspended") await srv.ctx.resume();
     }catch(e){
       showNote(isIOS?"Нет доступа к микрофону. Разрешите его: Настройки → Приложения → Safari → Микрофон.":"Нет доступа к микрофону. Разрешите его для этого сайта.");
       setState(false); srvRelease(); return;
     }
-    if(!listening) return;
-    if(!srv.rec || srv.rec.state!=="recording") srvNewSegment(); else srvCut(false); // после паузы начинаем с чистого куска
-    clearInterval(srv.timer); srv.timer=setInterval(srvTick,50);
+    // после паузы начинаем с чистого куска
+    srv.seg=[]; srv.segLen=0; srv.pre=[]; srv.preLen=0; srv.speech=false; srv.silence=0;
   }
-  function srvPause(){ srvCut(true); } // дослать последнюю фразу; дальше куски не отправляются, пока пауза
+  function srvPause(){ srvCut(); } // дослать последнюю фразу
   function srvRelease(){
-    clearInterval(srv.timer); srv.timer=null;
-    try{ srv.rec&&srv.rec.state!=="inactive"&&(srv.rec._send=false,srv.rec.stop()); }catch(_){}
-    srv.rec=null;
+    try{ srv.proc&&srv.proc.disconnect(); srv.src&&srv.src.disconnect(); }catch(_){}
     if(srv.stream){ srv.stream.getTracks().forEach(t=>t.stop()); srv.stream=null; }
     if(srv.ctx){ try{ srv.ctx.close(); }catch(_){} srv.ctx=null; }
-    srv.an=null;
+    srv.proc=null; srv.src=null;
   }
-  // Пустой WAV на 1 с: проверяем, что сервер принимает звук
-  function silentWav(){
-    const rate=16000,n=rate,b=new ArrayBuffer(44+n*2),v=new DataView(b);
-    const w=(o,s)=>{for(let i=0;i<s.length;i++)v.setUint8(o+i,s.charCodeAt(i));};
-    w(0,"RIFF");v.setUint32(4,36+n*2,true);w(8,"WAVE");w(12,"fmt ");v.setUint32(16,16,true);v.setUint16(20,1,true);v.setUint16(22,1,true);
-    v.setUint32(24,rate,true);v.setUint32(28,rate*2,true);v.setUint16(32,2,true);v.setUint16(34,16,true);w(36,"data");v.setUint32(40,n*2,true);
-    return new Blob([b],{type:"audio/wav"});
-  }
+  // Проверка: секунда тишины на распознавание
+  const silent=()=>new Int16Array(RATE);
+  function asrSay(id,t,k){ const o=$(id); o.hidden=false; o.textContent=t; o.dataset.kind=k||""; }
+  $("yaCheck").onclick=async()=>{
+    store.set("yaKey",$("yaKey").value.trim());
+    if(!$("yaKey").value.trim()){ asrSay("yaMsg","Сначала вставьте API-ключ Яндекса.","err"); return; }
+    asrSay("yaMsg","Проверяю…","");
+    try{ await postYandex(silent()); asrSay("yaMsg","Работает: Yandex SpeechKit принял ключ. Можно нажимать «Слушать».","ok"); }
+    catch(e){ asrSay("yaMsg","Не работает: "+e.message+".","err"); }
+  };
   $("asrCheck").onclick=async()=>{
-    const out=$("asrMsg"); const say=(t,k)=>{ out.hidden=false; out.textContent=t; out.dataset.kind=k||""; };
-    const c=cfg(); if(!c.key){ say("Сначала вставьте ключ API в разделе «Модель».","err"); return; }
-    say("Проверяю…","");
-    // 1) модели распознавания в списке ключа
+    const c=cfg(); if(!c.key){ asrSay("asrMsg","Сначала вставьте ключ API в разделе «Модель».","err"); return; }
+    asrSay("asrMsg","Проверяю…","");
     try{
       const r=await fetch(c.base+"/models",{headers:headers(c)});
       if(r.ok){
@@ -1341,9 +1391,8 @@ details.more[open] summary{margin-bottom:10px}
         }
       }
     }catch(_){}
-    // 2) пробный запрос с секундой тишины
-    try{ await asrPost(asrForm(silentWav())); say("Работает: сервер распознаёт звук моделью "+($("asrModel").value.trim()||"whisper-1")+". Можно включать «Через сервер».","ok"); }
-    catch(e){ say("Не работает: "+e.message+". Значит, ваш ключ не поддерживает распознавание звука — оставьте встроенное.","err"); }
+    try{ await postWhisper(silent(),""); asrSay("asrMsg","Работает: сервер распознаёт звук моделью "+($("asrModel").value.trim()||"whisper-1")+".","ok"); }
+    catch(e){ asrSay("asrMsg","Не работает: "+e.message+". Значит, ваш ключ не поддерживает распознавание звука.","err"); }
   };
 
   const doNew=()=>{ newChat(); closeSheets(); showNote("Начат новый чат",2000); };
