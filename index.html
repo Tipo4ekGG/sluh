@@ -313,7 +313,7 @@ details.more[open] summary{margin-bottom:10px}
         <p class="hint">Ключ хранится только на этом устройстве и в облако не попадает.</p>
       </div>
     </div>
-    <p class="hint" style="text-align:center">Версия сайта от 19 октября, №7</p>
+    <p class="hint" style="text-align:center">Версия сайта от 21 октября, №9</p>
   </div>
 </section>
 
@@ -449,6 +449,7 @@ details.more[open] summary{margin-bottom:10px}
   const PREP=new Set("в во на с со о об по за из у к ко от до для при через про над под".split(" "));
   const QFORM=/^(как(ой|ая|ое|ие|ого|ому|им|ом|ую|их|ими|ова|ово|овы)|кем|ком|чём|скольк\p{L}+|чьего|чьей|чьему|чьих)$/u;
   function splitQuestions(text){
+    if(hasOptions(text) || TEST_Q.test(text.toLowerCase())) return null; // варианты теста не режем
     const w=text.split(/\s+/).filter(Boolean), n=w.map(x=>x.toLowerCase().replace(/ё/g,"е").replace(/[^\p{L}]/gu,""));
     const cuts=[]; let seenQ=false;
     for(let i=0;i<n.length;i++){
@@ -476,6 +477,43 @@ details.more[open] summary{margin-bottom:10px}
     return fresh;
   }
 
+  // Похоже на тестовый вопрос, к которому ещё прозвучат варианты
+  const TEST_Q=/(как(ой|ая|ое|ие|ими|их) из|какими|признак|верно ли|является ли|выберите|укажите|следующ\p{L}* (утвержден|вариант)|из перечисленн)/u;
+  // Прозвучали ли сами варианты ответа: «а … б …», «да / нет», «вариант …»
+  function realOptions(t){
+    const x=" "+t.toLowerCase()+" ";
+    return (/\s[аa][\s).]/.test(x) && /\s[бb][\s).]/.test(x)) || /(вариант|\sда\s.*\sнет\s|\sверно\s.*\sневерно)/.test(x);
+  }
+  // Организационные фразы и просьбы повторить — на них не отвечаем
+  const FILLER=/^(а |и |так |ну )?(можно |давайте )?(ещ[её] раз|повтор\p{L}*|(первый|второй|третий|четв[её]ртый|пятый|шестой|седьмой|следующий|последний)( вопрос)?|вопрос( номер)?( \p{L}+)?|всё|все|дальше|понятно|спасибо)( пожалуйста)?$/u;
+  const STOP=new Set("это эта этот эти так там тут вот как что кто где когда сколько можно ещё еще раз пожалуйста ли же бы а и но да нет или".split(" "));
+  function meaningful(t){ return t.toLowerCase().split(/\s+/).map(normWord).filter(w=>w.length>=3&&!STOP.has(w)&&!Q_WORDS.has(w)); }
+  function isFiller(t){ const n=t.toLowerCase().replace(/[^\p{L}\s]/gu,"").trim(); return FILLER.test(n) || (!hasOptions(t) && meaningful(t).length===0); }
+  // Повтор уже отвеченного вопроса (преподаватель читает его ещё раз)
+  let recentQs=[]; // {stems:Set, opts:bool, at}
+  const stems=t=>new Set(meaningful(t).map(w=>w.slice(0,4)));
+  function isRepeat(t){
+    const st=stems(t); if(st.size<3) return false;
+    const now=Date.now(), opts=realOptions(t);
+    return recentQs.some(r=>{
+      if(now-r.at>10*60*1000) return false;
+      if(opts && !r.opts) return false; // теперь прозвучали варианты — это новое
+      let hit=0; st.forEach(x=>{ if(r.stems.has(x)) hit++; });
+      return hit/st.size>=0.6;
+    });
+  }
+  function rememberQ(t){ recentQs.push({stems:stems(t),opts:realOptions(t),at:Date.now()}); if(recentQs.length>30) recentQs.shift(); }
+  let forceTimer=null;
+  // Если варианты так и не дочитали за 7 с тишины — отвечаем по тому, что прозвучало.
+  function armForce(){
+    clearTimeout(forceTimer);
+    forceTimer=setTimeout(()=>{
+      if(pending.length) return;
+      const tail=[]; for(let k=transcript.length-1;k>=0&&transcript[k].status==="incomplete"&&tail.length<14;k--) tail.unshift(transcript[k]);
+      if(tail.length && hasModel()) answer(tail,"force");
+    },7000);
+  }
+
   // ---- Склейка речи по паузам ----
   // Строки копятся, пока человек говорит. После паузы кусок оценивается целиком:
   // так склеиваются разорванные вопросы и варианты ответа.
@@ -499,19 +537,32 @@ details.more[open] summary{margin-bottom:10px}
       groups.forEach(g=>answer(g, mode==="all"?"all":"auto"));
       return;
     }
+    clearTimeout(forceTimer);
     const own=items.map(i=>i.text).join(" ");
-    const looks=maybeQuestion(own)||hasOptions(own);
     const idx=transcript.indexOf(items[0]);
+    // все подряд идущие незаконченные строки перед куском (вопрос без вариантов и т.п.)
+    const carry=[]; for(let k=idx-1;k>=0&&transcript[k].status==="incomplete"&&carry.length<14;k--) carry.unshift(transcript[k]);
+    if(mode!=="all"){
+      if(!carry.length && isFiller(own)) return;            // «можно ещё раз», «сколько», «второй вопрос»
+      if(!carry.length && isRepeat(own)) { items.forEach(i=>i.status="repeat"); return; } // вопрос прочитали ещё раз
+    }
+    const looks=maybeQuestion(own)||hasOptions(own)||TEST_Q.test(own.toLowerCase());
     const prev=idx>0?transcript[idx-1]:null;
     let group=items;
-    if(prev && (prev.status==="incomplete" || (prev.status==="rejected" && looks))) group=[prev,...items];
-    if(mode==="all" || looks || (prev && prev.status==="incomplete")) answer(group, mode==="all"?"all":"auto");
+    if(carry.length) group=[...carry,...items];
+    else if(prev && prev.status==="rejected" && looks) group=[prev,...items];
+    // тестовый вопрос, а вариантов ещё нет — ждём их, не тратя запрос к модели
+    const gtext=group.map(i=>i.text).join(" ");
+    if(mode!=="all" && TEST_Q.test(gtext.toLowerCase()) && !realOptions(gtext)){
+      group.forEach(i=>i.status="incomplete"); armForce(); return;
+    }
+    if(mode==="all" || looks || carry.length) answer(group, mode==="all"?"all":"auto");
   }
 
   // Подсвечиваем строки начиная с той, где начинается вопрос: вступление до него не трогаем.
   function questionPart(group){
     if(group.length<2) return group;
-    const i=group.findIndex(x=>maybeQuestion(x.text)||hasOptions(x.text));
+    const i=group.findIndex(x=>maybeQuestion(x.text)||hasOptions(x.text)||TEST_Q.test(x.text.toLowerCase()));
     return i<0?group.slice(-1):group.slice(i);
   }
 
@@ -557,22 +608,25 @@ details.more[open] summary{margin-bottom:10px}
     group.forEach(i=>i.row.dataset.asked="1");
     let ui=null, extra=null, split=null; // split: [{item, ui}] после разрезания строки на несколько вопросов
     const near=nearBottom();
-    if(kind==="auto"){ last.row.classList.add("checking"); }
+    const quiet=kind==="auto"||kind==="force";
+    if(quiet){ last.row.classList.add("checking"); }
     else{ questionPart(group).forEach(i=>i.row.classList.add("q")); ui=makeAnswerBox(last); ui.box.classList.add("wait"); ui.body.textContent="Думаю…"; follow(near); }
     const release=st=>group.forEach(i=>{i.status=st; delete i.row.dataset.asked;});
     const fragment=group.map(i=>i.text).join(" ");
     const context=transcript.map(l=>l.text).join("\n").slice(-4000);
     const done=answeredLog.length?"<уже_отвечено>\n"+answeredLog.join("\n")+"\n</уже_отвечено>\n\n":"";
     const common="Ты слушаешь живую речь (лекцию, разговор, устный тест) через диктофон и подсказываешь ответы. Распознавание не ставит знаков препинания, может ошибаться в словах и резать фразы в случайных местах: начало вопроса может оказаться в одной строке, а продолжение в следующей.\n\n<расшифровка>\n"+context+"\n</расшифровка>\n\n"+done;
-    const rules="- Если в нём есть вопрос (прямой, косвенный или задание вроде «объясните…», «назовите…»), ответь на него точно, в 1–4 предложениях. Если начало вопроса было в предыдущих строках расшифровки, склей их.\n- Если это вопрос с вариантами ответа (а/б/в, первый/второй, «X или Y», «верно или неверно»), начни ответ с правильного варианта, например «Ответ: б) Париж», и добавь одно предложение, почему.\n- Если фрагмент содержит варианты ответа или уточнение к вопросу, который прозвучал раньше, ответь на весь вопрос целиком с учётом вариантов, даже если на него уже отвечали без них.\n- Если во фрагменте несколько разных вопросов, ответь на каждый отдельно.\n- Отвечай только на вопросы, которые есть в самом фрагменте. Расшифровка дана для контекста: на вопросы из других её строк не отвечай, на них ответят отдельно.\n";
+    const rules="- Если в нём есть вопрос (прямой, косвенный или задание вроде «объясните…», «назовите…»), ответь на него точно, в 1–4 предложениях. Если начало вопроса было в предыдущих строках расшифровки, склей их.\n- Если это вопрос с вариантами ответа (а/б/в, первый/второй, «X или Y», «верно или неверно»), начни ответ с правильного варианта, например «Ответ: б) Париж», и добавь одно предложение, почему. В тесте бывает несколько верных вариантов: если верных несколько, назови все, например «Ответ: а, б». Распознавание часто путает буквы вариантов и слова: восстанавливай смысл по контексту.\n- Не отвечай на организационные фразы и просьбы повторить («можно ещё раз», «следующий вопрос»).\n- Если фрагмент содержит варианты ответа или уточнение к вопросу, который прозвучал раньше, ответь на весь вопрос целиком с учётом вариантов, даже если на него уже отвечали без них.\n- Если во фрагменте несколько разных вопросов, ответь на каждый отдельно.\n- На субъективные, шуточные и разговорные вопросы («у кого самые смешные анекдоты», «что лучше посмотреть») тоже отвечай коротко: назови популярные варианты или общее мнение.\n- Отвечай только на вопросы, которые есть в самом фрагменте. Расшифровка дана для контекста: на вопросы из других её строк не отвечай, на них ответят отдельно.\n";
     const format="\nФормат ответа строго такой, по паре строк на каждый вопрос, в том порядке, в котором вопросы прозвучали:\n? <слова, с которых начинается вопрос, точно как они записаны во фрагменте>\n= <ответ>\nНичего, кроме этих строк, не пиши. Пример для фрагмента «итак какая столица франции и сколько будет два плюс два»:\n? какая столица франции\n= Париж.\n? сколько будет два плюс два\n= Четыре.";
     let prompt;
     if(kind==="manual"){
       prompt=common+"Пользователь сам отметил строку: «"+fragment+"». Вопрос может начинаться в предыдущей строке расшифровки или продолжаться в следующей.\n\nПравила:\n"+rules+"- Если вопроса нет, напиши одну строку «= » с коротким полезным комментарием.\n"+format+"\nОтвечай на языке фрагмента, без вступлений.";
     }else if(kind==="all"){
       prompt=common+"Новый фрагмент речи: «"+fragment+"».\n\nПравила:\n"+rules+"- Если вопроса нет, напиши одну строку «= » с коротким полезным комментарием.\n"+format+"\nОтвечай на языке фрагмента, без вступлений.";
+    }else if(kind==="force"){
+      prompt=common+"Фрагмент речи: «"+fragment+"». Продолжения не было, поэтому отвечай по тому, что прозвучало.\n\nПравила:\n"+rules+"- Если вопроса нет, ответь ровно одним символом: —\n"+format+"\nОтвечай на языке фрагмента, без вступлений.";
     }else{
-      prompt=common+"Новый фрагмент речи: «"+fragment+"».\n\nПравила:\n"+rules+"- Если вопрос явно оборван на полуслове и его продолжение ещё не прозвучало, ответь ровно одним символом: …\n- Если вопроса нет (например, «когда я был студентом…», «я не знаю, где он») или на него уже ответили и ничего нового не прозвучало, ответь ровно одним символом: —\n"+format+"\nОтвечай на языке фрагмента, без вступлений.";
+      prompt=common+"Новый фрагмент речи: «"+fragment+"».\n\nПравила:\n"+rules+"- Если вопрос явно оборван на полуслове и его продолжение ещё не прозвучало, ответь ровно одним символом: …\n- Если это тестовый вопрос («какой из…», «какие из…», «верно ли…», «выберите…»), а варианты ответа ещё не прозвучали или прозвучали не все (например, есть «а» и «б», а по смыслу будут ещё), ответь ровно одним символом: … — ответ дадим, когда варианты дочитают.\n- Если вопроса нет (например, «когда я был студентом…», «я не знаю, где он») или на него уже ответили и ничего нового не прозвучало, ответь ровно одним символом: —\n"+format+"\nОтвечай на языке фрагмента, без вступлений.";
     }
 
     // Разрезает строки куска на «вступление + вопрос 1 + вопрос 2…» и ставит ответ под каждым.
@@ -615,11 +669,13 @@ details.more[open] summary{margin-bottom:10px}
       if(!qs.length) return true;
       return qs.filter(w=>fragStems.has(w.slice(0,3))).length/qs.length>=0.5;
     }
+    const NOISE=/^[\s—–\-.…]*$/;
+    // служебный ответ «…» (вопрос оборван) в любом формате: «…» или «= …»
+    const isIncomplete=t=>/^(…|\.{3})$/.test(t) || (()=>{ const {pairs}=parsePairs(t); return pairs.length>0 && pairs.every(p=>/^(…|\.{3})$/.test(p.a)); })();
     function ownAnswers(t){
       const {plain,pairs}=parsePairs(t);
       if(!pairs.length) return [{q:"",qDone:true,a:plain}];
-      const own=pairs.filter(p=>inFragment(p.q));
-      return own;
+      return pairs.filter(p=>inFragment(p.q) && !(p.a && NOISE.test(p.a)));
     }
     function render(t,final){
       const n=nearBottom();
@@ -651,13 +707,18 @@ details.more[open] summary{margin-bottom:10px}
     try{
       const text=(await callModel(prompt,t=>{ if(!noise.test(t)) render(t,false); })||"").trim();
       last.row.classList.remove("checking");
-      if(kind==="auto" && /^(…|\.{3})$/.test(text)){ if(ui) ui.box.remove(); release("incomplete"); return; }
-      if(kind==="auto" && noise.test(text)){ if(ui) ui.box.remove(); group.forEach(i=>i.row.classList.remove("q")); release("rejected"); return; }
+      if(kind==="auto" && isIncomplete(text)){
+        if(ui) ui.box.remove(); if(extra) extra.forEach(u=>u.box.remove()); release("incomplete");
+        // если за 7 с ничего не дочитали — отвечаем по тому, что есть
+        armForce();
+        return;
+      }
+      if(quiet && noise.test(text)){ if(ui) ui.box.remove(); group.forEach(i=>i.row.classList.remove("q")); release("rejected"); return; }
       const answers=ownAnswers(text);
       if(!answers.length || !answers.some(p=>p.a)){
         // все ответы были про другие строки — для этого куска ответа нет
         if(ui) ui.box.remove(); if(extra) extra.forEach(u=>u.box.remove());
-        if(kind==="auto"){ group.forEach(i=>i.row.classList.remove("q")); release("rejected"); return; }
+        if(quiet){ group.forEach(i=>i.row.classList.remove("q")); release("rejected"); return; }
         ui=makeAnswerBox(group[group.length-1]); ui.body.textContent="Вопроса здесь нет.";
         group.forEach(i=>{ delete i.row.dataset.asked; }); return;
       }
@@ -672,6 +733,7 @@ details.more[open] summary{margin-bottom:10px}
         group[group.length-1].answers=(group[group.length-1].answers||[]).concat(saved);
       }
       answeredLog.push(fragment.slice(0,200)); if(answeredLog.length>6) answeredLog.shift();
+      rememberQ(fragment);
       saveSoon();
     }catch(e){
       last.row.classList.remove("checking");
@@ -966,12 +1028,29 @@ details.more[open] summary{margin-bottom:10px}
     const dl=$("models"); dl.innerHTML="";
     ids.forEach(id=>{const o=document.createElement("option");o.value=id;dl.append(o);});
     if(ids.length && !$("model").value.trim()){
-      const pick=ids.find(i=>/haiku/i.test(i))||ids.find(i=>/sonnet/i.test(i))||ids.find(i=>/mini|flash/i.test(i))||ids[0];
+      const pick=pickSonnet(ids)||ids.find(i=>/haiku/i.test(i))||ids.find(i=>/mini|flash/i.test(i))||ids[0];
       $("model").value=pick; store.set("model",pick);
     }
     refreshSetup();
     say(ids.length?"Ключ рабочий, моделей доступно: "+ids.length+". Выбрана "+$("model").value+". Другую можно выбрать в поле «Модель».":"Ключ принят. Впишите название модели вручную.","ok");
   };
+
+  // ---- Модель: Sonnet 5 ----
+  // Выбираем Sonnet 5 из списка моделей ключа: на тестах он заметно точнее дешёвых моделей.
+  function pickSonnet(ids){
+    const s5=ids.filter(i=>/sonnet[-_. ]?5(?![.\d])/i.test(i)||/sonnet[-_. ]?5[-_.]0/i.test(i));
+    return s5.find(i=>!/think|reason/i.test(i))||s5[0]||null;
+  }
+  (async function switchToSonnet(){
+    if(store.get("model_pref","")==="sonnet5") return;
+    const c=cfg(); if(!c.key) return;
+    try{
+      const r=await fetch(c.base+"/models",{headers:headers(c)}); if(!r.ok) return;
+      const ids=(((await r.json())||{}).data||[]).map(m=>m.id).filter(Boolean);
+      const id=pickSonnet(ids);
+      if(id){ $("model").value=id; store.set("model",id); store.set("model_pref","sonnet5"); refreshSetup(); showNote("Модель переключена на "+id,4000); }
+    }catch(_){}
+  })();
 
   // ---- Запись ----
   // На iPhone распознавание иногда «зависает»: микрофон включён, а текст не приходит,
