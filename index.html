@@ -349,7 +349,7 @@ details.more[open] summary{margin-bottom:10px}
         <p class="hint">Ключ хранится только на этом устройстве и в облако не попадает.</p>
       </div>
     </div>
-    <p class="hint" style="text-align:center">Версия сайта от 21 октября, №14</p>
+    <p class="hint" style="text-align:center">Версия сайта от 21 октября, №15</p>
   </div>
 </section>
 
@@ -1205,8 +1205,13 @@ details.more[open] summary{margin-bottom:10px}
       if(!mine()) return;
       engineOn=false;
       commitStale();
-      // распознаватель закончил сам (тишина, лимит времени) — запускаем новый, только если запись идёт
-      if(listening) restartTimer=setTimeout(()=>{ if(listening&&!engineOn) engineStart(); },isIOS?250:80);
+      // Распознаватель закончил сам (тишина, лимит времени). Запускаем ТОТ ЖЕ заново, а не новый:
+      // на iPhone каждый новый распознаватель сопровождается системным звуком микрофона.
+      if(listening) restartTimer=setTimeout(()=>{
+        if(!listening||engineOn||!mine()) return;
+        try{ committed=[]; latest=[]; r.start(); engineOn=true; lastHeard=Date.now(); }
+        catch(_){ engineStart(); } // не вышло — тогда уже новый
+      },isIOS?250:80);
     };
     try{ r.start(); }
     catch(e){ engineOn=false; restartTimer=setTimeout(()=>{ if(listening&&!engineOn) engineStart(); },600); return; }
