@@ -273,6 +273,21 @@ details.more[open] summary{margin-bottom:10px}
             <option value="ar-SA">Арабский</option>
           </select>
         </label>
+        <label class="field">Способ распознавания
+          <select id="asr">
+            <option value="browser">Встроенное в браузер — бесплатно</option>
+            <option value="server">Через сервер (Whisper) — точнее, платно</option>
+          </select>
+        </label>
+        <div class="group" id="asrBox">
+          <label class="field">Модель распознавания
+            <input id="asrModel" type="text" autocomplete="off" autocapitalize="off" list="asrModels" placeholder="whisper-1">
+            <datalist id="asrModels"></datalist>
+          </label>
+          <button class="btn" id="asrCheck" type="button">Проверить распознавание</button>
+          <p class="msg" id="asrMsg" hidden></p>
+          <p class="hint">Звук отправляется на тот же сервер, что и вопросы, по вашему ключу. Распознавание оплачивается отдельно, по длине записи.</p>
+        </div>
         <label class="field">Когда отвечать
           <select id="mode">
             <option value="questions">Сам, когда прозвучит вопрос</option>
@@ -313,7 +328,7 @@ details.more[open] summary{margin-bottom:10px}
         <p class="hint">Ключ хранится только на этом устройстве и в облако не попадает.</p>
       </div>
     </div>
-    <p class="hint" style="text-align:center">Версия сайта от 21 октября, №9</p>
+    <p class="hint" style="text-align:center">Версия сайта от 21 октября, №10</p>
   </div>
 </section>
 
@@ -338,6 +353,13 @@ details.more[open] summary{margin-bottom:10px}
   $("model").value = store.get("model","");
   function hasModel(){ return !!($("key").value.trim() && $("model").value.trim()); }
   function refreshSetup(){ $("setupCard").hidden=hasModel(); }
+  $("asr").value=store.get("asr","browser"); $("asrModel").value=store.get("asrModel","");
+  const showAsr=()=>{ $("asrBox").hidden=$("asr").value!=="server"; $("rec").disabled=$("asr").value==="browser"&&!(window.SpeechRecognition||window.webkitSpeechRecognition); };
+  showAsr();
+  ["asr","asrModel"].forEach(id=>$(id).addEventListener("change",()=>{
+    store.set(id,$(id).value.trim()); showAsr();
+    if(id==="asr"){ if(listening) stopListening(); releaseEngine(); srvRelease(); showNote("Способ распознавания изменён. Нажмите «Слушать».",4000); }
+  }));
   ["lang","mode","key","base","fmt","model"].forEach(id=>$(id).addEventListener("change",()=>{
     store.set(id,$(id).value.trim()); refreshSetup();
     if(id==="lang"&&engineOn) engineRestart();
@@ -358,7 +380,7 @@ details.more[open] summary{margin-bottom:10px}
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   let noteTimer=null;
   function showNote(msg,ms){ clearTimeout(noteTimer); note.textContent=msg||""; note.hidden=!msg; if(msg&&ms) noteTimer=setTimeout(()=>showNote(""),ms); }
-  if(!SR){ showNote("Этот браузер не распознаёт речь. Откройте сайт в Chrome на Android или в Safari на iPhone."); $("rec").disabled=true; }
+  if(!SR && $("asr").value==="browser"){ showNote("Этот браузер не распознаёт речь сам. Откройте сайт в Chrome или Safari, или включите распознавание через сервер в настройках."); }
 
   const transcript=[]; // {time,text,row,status,answers}
   let listening=false, rec=null;
@@ -1170,6 +1192,7 @@ details.more[open] summary{margin-bottom:10px}
   }
   function startListening(){
     showNote(""); clearTimeout(releaseTimer);
+    if(asrServer()){ setState(true); srvStart(); return; }
     const resume=engineOn&&rec;
     setState(true);
     if(resume){
@@ -1180,6 +1203,12 @@ details.more[open] summary{margin-bottom:10px}
     }else engineStart();
   }
   function stopListening(){
+    if(asrServer()){
+      srvPause(); setState(false);
+      clearTimeout(releaseTimer); releaseTimer=setTimeout(srvRelease,RELEASE_MS);
+      setTimeout(flush,2500); // дождаться распознавания последней фразы
+      return;
+    }
     clearTimeout(stallTimer); clearTimeout(watchTimer); clearTimeout(restartTimer);
     commitStaleNow();
     setState(false);
@@ -1189,6 +1218,134 @@ details.more[open] summary{margin-bottom:10px}
   }
   function commitStaleNow(){ const was=listening; listening=true; commitStale(); listening=was; latest=[]; }
   $("rec").onclick=()=>{ if(listening) stopListening(); else startListening(); };
+  // ---- Распознавание через сервер (Whisper и подобные) ----
+  // Пишем звук с микрофона, режем по паузам в речи и отправляем каждый кусок
+  // на /audio/transcriptions. Куски распознаются по очереди, чтобы строки шли по порядку.
+  const srv={stream:null,ctx:null,an:null,buf:null,rec:null,speech:false,segStart:0,lastVoice:0,floor:0.004,timer:null,mime:"",queue:Promise.resolve(),busy:0};
+  const asrServer=()=>$("asr").value==="server";
+  function pickMime(){
+    if(!window.MediaRecorder) return null;
+    const c=["audio/webm;codecs=opus","audio/webm","audio/mp4","audio/ogg;codecs=opus"];
+    return c.find(m=>MediaRecorder.isTypeSupported&&MediaRecorder.isTypeSupported(m))||"";
+  }
+  // Частые «галлюцинации» распознавания на тишине и шуме
+  const HALLU=/^(продолжение следует|субтитры|спасибо за (просмотр|внимание)|подписывайтесь|редактор субтитров|thank you|you|\.+|…)[\s.!…]*$/i;
+  function srvNewSegment(){
+    const r=new MediaRecorder(srv.stream, srv.mime?{mimeType:srv.mime}:undefined);
+    const parts=[]; r._send=false;
+    r.ondataavailable=e=>{ if(e.data&&e.data.size) parts.push(e.data); };
+    r.onstop=()=>{ if(r._send) srvEnqueue(new Blob(parts,{type:r.mimeType||srv.mime||"audio/webm"})); };
+    r.start(); srv.rec=r; srv.segStart=Date.now(); srv.speech=false;
+  }
+  // Закрыть текущий кусок (и, если в нём была речь и запись идёт, отправить) и сразу начать новый
+  function srvCut(send){
+    const old=srv.rec; if(!old) return;
+    old._send=!!send && srv.speech;
+    srvNewSegment();
+    try{ old.stop(); }catch(_){}
+  }
+  function srvTick(){
+    if(!srv.an) return;
+    srv.an.getFloatTimeDomainData(srv.buf);
+    let sum=0; for(let i=0;i<srv.buf.length;i++) sum+=srv.buf[i]*srv.buf[i];
+    const rms=Math.sqrt(sum/srv.buf.length), now=Date.now();
+    // уровень фонового шума подстраивается сам
+    if(rms<srv.floor*2.5) srv.floor=srv.floor*0.98+rms*0.02;
+    const voice=rms>Math.max(0.008,srv.floor*3);
+    if(voice){ srv.lastVoice=now; if(!srv.speech){ srv.speech=true; } }
+    if(!listening) return;
+    if(srv.speech && now-srv.lastVoice>900 && now-srv.segStart>1200) srvCut(true);   // пауза после фразы
+    else if(srv.speech && now-srv.segStart>25000) srvCut(true);                      // слишком длинный кусок
+    else if(!srv.speech && now-srv.segStart>15000) srvCut(false);                    // долгая тишина: выбрасываем
+    if(!srv.busy) interimEl.textContent=srv.speech?"Слышу речь…":"Слушаю…";
+  }
+  function srvEnqueue(blob){ srv.queue=srv.queue.then(()=>srvTranscribe(blob)).catch(()=>{}); }
+  function asrForm(blob){
+    const fd=new FormData();
+    const ext=/mp4|aac|m4a/.test(blob.type)?"m4a":/ogg/.test(blob.type)?"ogg":/wav/.test(blob.type)?"wav":"webm";
+    fd.append("file",blob,"speech."+ext);
+    fd.append("model",$("asrModel").value.trim()||"whisper-1");
+    fd.append("language",$("lang").value.slice(0,2));
+    fd.append("response_format","json");
+    return fd;
+  }
+  async function asrPost(fd){
+    const c=cfg(), h=headers(c); delete h["content-type"]; // границу multipart браузер поставит сам
+    let r; try{ r=await fetch(c.base+"/audio/transcriptions",{method:"POST",headers:h,body:fd}); }
+    catch(e){ throw new Error("сервер не отвечает"); }
+    const data=await r.json().catch(()=>({}));
+    if(!r.ok){ if(r.status===404) throw new Error("сервер не умеет распознавать звук"); throw apiError(r.status,data); }
+    return (data.text||"").trim();
+  }
+  async function srvTranscribe(blob){
+    if(blob.size<1500) return;
+    srv.busy++; interimEl.textContent="Распознаю…";
+    try{
+      const fd=asrForm(blob);
+      const ctxText=transcript.slice(-5).map(i=>i.text).join(" ").slice(-400);
+      if(ctxText) fd.append("prompt",ctxText); // предыдущие фразы помогают с терминами
+      const t=await asrPost(fd);
+      if(t && !HALLU.test(t)) addLine(t);
+    }catch(e){ showNote("Распознавание через сервер: "+e.message+". Переключитесь на встроенное в настройках.",7000); }
+    finally{ srv.busy--; if(!srv.busy) interimEl.textContent=listening?"Слушаю…":""; }
+  }
+  async function srvStart(){
+    if(pickMime()===null){ showNote("Этот браузер не умеет записывать звук. Выберите встроенное распознавание."); setState(false); return; }
+    try{
+      if(!srv.ctx) srv.ctx=new (window.AudioContext||window.webkitAudioContext)(); // создаём в момент нажатия — так требует iPhone
+      if(!srv.stream){
+        srv.stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}});
+        const src=srv.ctx.createMediaStreamSource(srv.stream);
+        srv.an=srv.ctx.createAnalyser(); srv.an.fftSize=1024; srv.buf=new Float32Array(srv.an.fftSize);
+        src.connect(srv.an); srv.mime=pickMime();
+      }
+      if(srv.ctx.state==="suspended") await srv.ctx.resume();
+    }catch(e){
+      showNote(isIOS?"Нет доступа к микрофону. Разрешите его: Настройки → Приложения → Safari → Микрофон.":"Нет доступа к микрофону. Разрешите его для этого сайта.");
+      setState(false); srvRelease(); return;
+    }
+    if(!listening) return;
+    if(!srv.rec || srv.rec.state!=="recording") srvNewSegment(); else srvCut(false); // после паузы начинаем с чистого куска
+    clearInterval(srv.timer); srv.timer=setInterval(srvTick,50);
+  }
+  function srvPause(){ srvCut(true); } // дослать последнюю фразу; дальше куски не отправляются, пока пауза
+  function srvRelease(){
+    clearInterval(srv.timer); srv.timer=null;
+    try{ srv.rec&&srv.rec.state!=="inactive"&&(srv.rec._send=false,srv.rec.stop()); }catch(_){}
+    srv.rec=null;
+    if(srv.stream){ srv.stream.getTracks().forEach(t=>t.stop()); srv.stream=null; }
+    if(srv.ctx){ try{ srv.ctx.close(); }catch(_){} srv.ctx=null; }
+    srv.an=null;
+  }
+  // Пустой WAV на 1 с: проверяем, что сервер принимает звук
+  function silentWav(){
+    const rate=16000,n=rate,b=new ArrayBuffer(44+n*2),v=new DataView(b);
+    const w=(o,s)=>{for(let i=0;i<s.length;i++)v.setUint8(o+i,s.charCodeAt(i));};
+    w(0,"RIFF");v.setUint32(4,36+n*2,true);w(8,"WAVE");w(12,"fmt ");v.setUint32(16,16,true);v.setUint16(20,1,true);v.setUint16(22,1,true);
+    v.setUint32(24,rate,true);v.setUint32(28,rate*2,true);v.setUint16(32,2,true);v.setUint16(34,16,true);w(36,"data");v.setUint32(40,n*2,true);
+    return new Blob([b],{type:"audio/wav"});
+  }
+  $("asrCheck").onclick=async()=>{
+    const out=$("asrMsg"); const say=(t,k)=>{ out.hidden=false; out.textContent=t; out.dataset.kind=k||""; };
+    const c=cfg(); if(!c.key){ say("Сначала вставьте ключ API в разделе «Модель».","err"); return; }
+    say("Проверяю…","");
+    // 1) модели распознавания в списке ключа
+    try{
+      const r=await fetch(c.base+"/models",{headers:headers(c)});
+      if(r.ok){
+        const ids=(((await r.json())||{}).data||[]).map(m=>m.id).filter(Boolean).filter(i=>/whisper|transcri|speech|stt|audio/i.test(i));
+        const dl=$("asrModels"); dl.innerHTML=""; ids.forEach(id=>{const o=document.createElement("option");o.value=id;dl.append(o);});
+        if(ids.length && !ids.includes($("asrModel").value.trim())){
+          const pick=ids.find(i=>/gpt-4o.*transcri/i.test(i)&&!/mini/i.test(i))||ids.find(i=>/whisper/i.test(i))||ids[0];
+          $("asrModel").value=pick; store.set("asrModel",pick);
+        }
+      }
+    }catch(_){}
+    // 2) пробный запрос с секундой тишины
+    try{ await asrPost(asrForm(silentWav())); say("Работает: сервер распознаёт звук моделью "+($("asrModel").value.trim()||"whisper-1")+". Можно включать «Через сервер».","ok"); }
+    catch(e){ say("Не работает: "+e.message+". Значит, ваш ключ не поддерживает распознавание звука — оставьте встроенное.","err"); }
+  };
+
   const doNew=()=>{ newChat(); closeSheets(); showNote("Начат новый чат",2000); };
   $("newBtn").onclick=doNew; $("newBtn2").onclick=doNew;
   $("copy").onclick=async()=>{
@@ -1242,8 +1399,8 @@ details.more[open] summary{margin-bottom:10px}
   // ---- Старт ----
   window.addEventListener("pagehide",()=>{ saveNow(); flushPush(); });
   document.addEventListener("visibilitychange",()=>{
-    if(document.visibilityState==="hidden"){ saveNow(); flushPush(); if(!listening) releaseEngine(); }
-    else{ if(user) pullAll(); if(listening) engineRestart(); else if(engineOn) releaseEngine(); }
+    if(document.visibilityState==="hidden"){ saveNow(); flushPush(); if(!listening){ releaseEngine(); srvRelease(); } }
+    else{ if(user) pullAll(); if(asrServer()){ if(listening) srvStart(); } else if(listening) engineRestart(); else if(engineOn) releaseEngine(); }
   });
   { const last=chats.find(c=>c.id===store.get("current",""));
     if(last) renderChat(last); else newChat(); }
