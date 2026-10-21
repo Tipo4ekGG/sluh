@@ -87,6 +87,7 @@ button{cursor:pointer}
 .qlabel{display:block;color:var(--muted);font-size:13px;margin-bottom:2px}
 .answer.err{border-color:var(--rec)}
 .answer.err .who{color:var(--rec)}
+.gap{align-self:center;margin:6px 0;padding:4px 12px;border-radius:999px;background:var(--sunk);color:var(--muted);font:500 12px var(--font-mono);text-align:center}
 .to-bottom{position:absolute;left:50%;transform:translateX(-50%);bottom:calc(100% + 10px);border:1px solid var(--line);background:var(--surface);color:var(--fg);border-radius:999px;padding:7px 14px;font-size:13px;font-weight:500;box-shadow:0 2px 10px rgba(0,0,0,.12)}
 
 /* Dock */
@@ -259,6 +260,7 @@ details.more[open] summary{margin-bottom:10px}
       <div class="card">
         <p class="msg" id="micMode"></p>
         <p class="hint"><b>Чтобы Safari не спрашивал каждый раз:</b> откройте сайт в Safari, нажмите значок слева в адресной строке → «Настройки веб-сайта» → «Микрофон» → «Разрешить». Или для всех сайтов сразу: Настройки → Приложения → Safari → Микрофон → «Разрешить».</p>
+        <p class="hint"><b>В фоне запись не работает:</b> когда сайт свёрнут или экран заблокирован, iPhone выключает микрофон у любого сайта. Пока идёт запись, сайт сам не даёт экрану погаснуть, а после возвращения продолжает запись и отмечает пропуск в ленте.</p>
         <p class="hint"><b>Если запись идёт, а текста нет:</b> проверьте, что Safari разрешено распознавание речи: Настройки → Конфиденциальность и безопасность → Распознавание речи. Сайт и сам перезапускает зависшее распознавание через несколько секунд.</p>
       </div>
     </div>
@@ -349,7 +351,7 @@ details.more[open] summary{margin-bottom:10px}
         <p class="hint">Ключ хранится только на этом устройстве и в облако не попадает.</p>
       </div>
     </div>
-    <p class="hint" style="text-align:center">Версия сайта от 21 октября, №15</p>
+    <p class="hint" style="text-align:center">Версия сайта от 21 октября, №16</p>
   </div>
 </section>
 
@@ -815,7 +817,7 @@ details.more[open] summary{margin-bottom:10px}
   }
   function resetTape(){
     clearTimeout(flushTimer); pending=[]; answeredLog=[]; transcript.length=0;
-    tape.querySelectorAll(".line,.answer").forEach(n=>n.remove()); emptyEl.hidden=false; $("toBottom").hidden=true;
+    tape.querySelectorAll(".line,.answer,.gap").forEach(n=>n.remove()); emptyEl.hidden=false; $("toBottom").hidden=true;
   }
   function newChat(){
     saveNow(); resetTape();
@@ -1128,8 +1130,26 @@ details.more[open] summary{margin-bottom:10px}
   let gen=0, committed=[], latest=[], stallTimer=null, watchTimer=null, restartTimer=null, releaseTimer=null;
   let engineOn=false, lastHeard=0;
   const RELEASE_MS=90000; // пауза дольше полутора минут — отпускаем микрофон по-настоящему
+  // Пока идёт запись, экран не гаснет сам: иначе iPhone заблокируется и остановит микрофон.
+  let wakeLock=null;
+  async function keepAwake(on){
+    try{
+      if(on && document.visibilityState==="visible" && !wakeLock && navigator.wakeLock){
+        wakeLock=await navigator.wakeLock.request("screen");
+        wakeLock.addEventListener("release",()=>{ wakeLock=null; });
+      }else if(!on && wakeLock){ const w=wakeLock; wakeLock=null; await w.release(); }
+    }catch(_){ wakeLock=null; }
+  }
+  // Отметка в ленте о том, что запись не шла, пока сайт был свёрнут (в историю не сохраняется)
+  function gapMark(ms){
+    const m=Math.round(ms/60000), sec=Math.round(ms/1000);
+    const el=document.createElement("div"); el.className="gap";
+    el.textContent="Запись не шла "+(m>=1?m+" мин":sec+" с")+": сайт был свёрнут или экран выключен";
+    const near=nearBottom(); tape.append(el); emptyEl.hidden=true; follow(near);
+  }
+  let hiddenAt=0;
   function setState(on){
-    listening=on; app.classList.toggle("on",on);
+    listening=on; app.classList.toggle("on",on); keepAwake(on);
     $("recLabel").textContent=on?"Стоп":"Слушать";
     $("rec").setAttribute("aria-label",on?"Остановить запись":"Начать слушать");
     interimEl.textContent=on?"Слушаю…":"";
@@ -1517,8 +1537,16 @@ details.more[open] summary{margin-bottom:10px}
   // ---- Старт ----
   window.addEventListener("pagehide",()=>{ saveNow(); flushPush(); });
   document.addEventListener("visibilitychange",()=>{
-    if(document.visibilityState==="hidden"){ saveNow(); flushPush(); if(!listening){ releaseEngine(); srvRelease(); } }
-    else{ if(user) pullAll(); if(asrServer()){ if(listening) srvStart(); } else if(listening) engineRestart(); else if(engineOn) releaseEngine(); }
+    if(document.visibilityState==="hidden"){ hiddenAt=Date.now(); saveNow(); flushPush(); if(!listening){ releaseEngine(); srvRelease(); } }
+    else{
+      if(user) pullAll();
+      if(listening){
+        if(hiddenAt && Date.now()-hiddenAt>3000) gapMark(Date.now()-hiddenAt);
+        keepAwake(true); // блокировка экрана снимается при сворачивании — берём снова
+      }
+      hiddenAt=0;
+      if(asrServer()){ if(listening) srvStart(); } else if(listening) engineRestart(); else if(engineOn) releaseEngine();
+    }
   });
   { const last=chats.find(c=>c.id===store.get("current",""));
     if(last) renderChat(last); else newChat(); }
