@@ -349,7 +349,7 @@ details.more[open] summary{margin-bottom:10px}
         <p class="hint">Ключ хранится только на этом устройстве и в облако не попадает.</p>
       </div>
     </div>
-    <p class="hint" style="text-align:center">Версия сайта от 21 октября, №13</p>
+    <p class="hint" style="text-align:center">Версия сайта от 21 октября, №14</p>
   </div>
 </section>
 
@@ -462,7 +462,8 @@ details.more[open] summary{margin-bottom:10px}
     const near=nearBottom();
     const item=renderLine(clock(),text);
     pending.push(item);
-    schedule(); saveSoon(); follow(near);
+    const asks=/[?？؟]\s*$/.test(text) && !(TEST_Q.test(text.toLowerCase()) && !realOptions(text));
+    schedule(asks); saveSoon(); follow(near);
   }
   function makeAnswerBox(item){
     const box=document.createElement("div"); box.className="answer";
@@ -563,7 +564,9 @@ details.more[open] summary{margin-bottom:10px}
   // так склеиваются разорванные вопросы и варианты ответа.
   const PAUSE_MS=2200;
   let pending=[], flushTimer=null, answeredLog=[];
-  function schedule(){ clearTimeout(flushTimer); flushTimer=setTimeout(flush,PAUSE_MS); }
+  // Встроенное распознавание отдаёт обрывки, поэтому ждём 2,2 с тишины. Распознавание через
+  // сервер отдаёт законченные фразы — хватает 0,8 с, а после знака вопроса отправляем сразу.
+  function schedule(fast){ clearTimeout(flushTimer); flushTimer=setTimeout(flush,fast?250:($("asr").value!=="browser"?800:PAUSE_MS)); }
   function flush(){
     clearTimeout(flushTimer); flushTimer=null;
     if(!pending.length) return;
@@ -1257,7 +1260,7 @@ details.more[open] summary{margin-bottom:10px}
   const STT_URL="https://btvmezpdhhhmxraqirsc.supabase.co/functions/v1/sluh-stt";
   const RATE=16000;
   const srv={stream:null,ctx:null,src:null,proc:null,queue:Promise.resolve(),busy:0,
-    seg:[],segLen:0,pre:[],preLen:0,speech:false,silence:0,floor:0.004,carry:0,acc:0,accN:0};
+    seg:[],segRms:[],segLen:0,level:0,pre:[],preLen:0,speech:false,silence:0,floor:0.004,carry:0,acc:0,accN:0};
   const asrMode=()=>$("asr").value;                 // browser | cloudflare | yandex | server
   const asrServer=()=>asrMode()!=="browser";
   // Частые «галлюцинации» распознавания на тишине и шуме
@@ -1265,11 +1268,12 @@ details.more[open] summary{margin-bottom:10px}
 
   // Правила нарезки. Яндекс считает деньги за каждые начатые 15 с, поэтому короткие
   // фразы склеиваем: режем, когда кусок уже не меньше 6 с, или после долгой паузы.
+  // Без пауз (лекция) кусок не растёт дольше maxLen: режем в самой тихой точке последних секунд.
   const cutRules=()=>asrMode()==="yandex"
-    ? {minLen:6*RATE, pause:0.9*RATE, longPause:1.8*RATE, maxLen:25*RATE}
-    : {minLen:1.2*RATE, pause:0.9*RATE, longPause:1.8*RATE, maxLen:25*RATE};
+    ? {minLen:6*RATE, pause:0.7*RATE, longPause:1.4*RATE, maxLen:14*RATE, splitWin:2*RATE}
+    : {minLen:2*RATE, pause:0.45*RATE, longPause:1.0*RATE, maxLen:8*RATE, splitWin:1.5*RATE};
 
-  function pushSeg(chunk){ srv.seg.push(chunk); srv.segLen+=chunk.length; }
+  function pushSeg(chunk,r){ srv.seg.push(chunk); srv.segRms.push(r||0); srv.segLen+=chunk.length; }
   function pushPre(chunk){ srv.pre.push(chunk); srv.preLen+=chunk.length; while(srv.preLen>0.4*RATE&&srv.pre.length>1){ srv.preLen-=srv.pre.shift().length; } }
   function joinPcm(list,len){ const out=new Int16Array(len); let o=0; for(const c of list){ out.set(c,o); o+=c.length; } return out; }
   // Один блок звука с микрофона: понижаем частоту до 16 кГц и решаем, речь это или тишина
@@ -1285,36 +1289,51 @@ details.more[open] summary{margin-bottom:10px}
     if(!listening) return;
     const rms=Math.sqrt(sum/out.length);
     if(rms<srv.floor*2.5) srv.floor=srv.floor*0.97+rms*0.03;   // фоновый шум подстраивается сам
-    const voice=rms>Math.max(0.008,srv.floor*3);
+    // речь — это заметно громче фона и не тише трети обычной громкости говорящего
+    const voice=rms>Math.max(0.008,srv.floor*3,srv.level*0.3);
+    if(voice) srv.level=srv.level?srv.level*0.95+rms*0.05:rms;
     const R=cutRules();
     if(!srv.speech){
       if(voice){
-        if(!srv.segLen){ srv.seg=srv.pre.slice(); srv.segLen=srv.preLen; } // начало фразы — с небольшим запасом до неё
-        srv.pre=[]; srv.preLen=0; srv.speech=true; srv.silence=0; pushSeg(pcm);
+        if(!srv.segLen){ srv.seg=srv.pre.slice(); srv.segRms=srv.pre.map(()=>0); srv.segLen=srv.preLen; } // начало фразы — с небольшим запасом до неё
+        srv.pre=[]; srv.preLen=0; srv.speech=true; srv.silence=0; pushSeg(pcm,rms);
       }
       else{
         // тишина между фразами: копим её только внутри уже начатого куска
-        if(srv.segLen){ pushSeg(pcm); srv.silence+=pcm.length; if(srv.silence>=R.longPause) srvCut(); }
+        if(srv.segLen){ pushSeg(pcm,rms); srv.silence+=pcm.length; if(srv.silence>=R.longPause) srvCut(); }
         else pushPre(pcm);
       }
     }else{
-      pushSeg(pcm);
+      pushSeg(pcm,rms);
       if(voice){ srv.silence=0; }
       else{
         srv.silence+=pcm.length;
         if(srv.silence>=R.pause){ srv.speech=false; if(srv.segLen>=R.minLen) srvCut(); }
       }
-      if(srv.segLen>=R.maxLen) srvCut();
+      if(srv.segLen>=R.maxLen) srvSplit(R);
     }
     if(!srv.busy) interimEl.textContent=srv.speech?"Слышу речь…":"Слушаю…";
   }
   // Отправить накопленный кусок без лишней тишины в конце
   function srvCut(){
-    if(!srv.segLen){ srv.seg=[]; return; }
+    if(!srv.segLen){ srv.seg=[]; srv.segRms=[]; return; }
     let pcm=joinPcm(srv.seg,srv.segLen);
     const tail=Math.max(0,srv.silence-0.3*RATE); if(tail&&tail<pcm.length) pcm=pcm.subarray(0,pcm.length-tail);
-    srv.seg=[]; srv.segLen=0; srv.silence=0; srv.speech=false;
+    srv.seg=[]; srv.segRms=[]; srv.segLen=0; srv.silence=0; srv.speech=false;
     if(pcm.length<0.4*RATE) return;
+    srv.queue=srv.queue.then(()=>srvTranscribe(pcm)).catch(()=>{});
+  }
+  // Речь без пауз: отправляем всё до самой тихой точки последних секунд, остаток — в следующий кусок
+  function srvSplit(R){
+    let acc=0, best=-1, bestR=Infinity;
+    for(let i=srv.seg.length-2;i>0;i--){
+      acc+=srv.seg[i].length; if(acc>R.splitWin) break;
+      if(srv.segRms[i]<bestR){ bestR=srv.segRms[i]; best=i; }
+    }
+    if(best<0){ srvCut(); return; }
+    const head=srv.seg.slice(0,best+1), headLen=head.reduce((a,c)=>a+c.length,0);
+    srv.seg=srv.seg.slice(best+1); srv.segRms=srv.segRms.slice(best+1); srv.segLen-=headLen;
+    const pcm=joinPcm(head,headLen);
     srv.queue=srv.queue.then(()=>srvTranscribe(pcm)).catch(()=>{});
   }
   function wavFrom(pcm){
@@ -1397,7 +1416,7 @@ details.more[open] summary{margin-bottom:10px}
       setState(false); srvRelease(); return;
     }
     // после паузы начинаем с чистого куска
-    srv.seg=[]; srv.segLen=0; srv.pre=[]; srv.preLen=0; srv.speech=false; srv.silence=0;
+    srv.seg=[]; srv.segRms=[]; srv.segLen=0; srv.pre=[]; srv.preLen=0; srv.speech=false; srv.silence=0;
   }
   function srvPause(){ srvCut(); } // дослать последнюю фразу
   function srvRelease(){
