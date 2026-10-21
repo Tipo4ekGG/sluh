@@ -276,10 +276,22 @@ details.more[open] summary{margin-bottom:10px}
         <label class="field">Способ распознавания
           <select id="asr">
             <option value="browser">Встроенное в браузер — бесплатно</option>
+            <option value="cloudflare">Whisper в Cloudflare — точнее, бесплатно</option>
             <option value="yandex">Yandex SpeechKit — точнее, платно</option>
             <option value="server">Whisper через ключ модели</option>
           </select>
         </label>
+        <div class="group" id="cfBox">
+          <label class="field">Account ID в Cloudflare
+            <input id="cfAccount" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="32 символа из букв a–f и цифр">
+          </label>
+          <label class="field">API-токен Cloudflare
+            <input id="cfToken" type="password" autocomplete="off" placeholder="вставьте токен">
+          </label>
+          <button class="btn" id="cfCheck" type="button">Проверить Cloudflare</button>
+          <p class="msg" id="cfMsg" hidden></p>
+          <p class="hint">Токен хранится только на этом устройстве. Бесплатно примерно 200 минут распознавания в сутки, лимит обновляется в 03:00 по Москве.</p>
+        </div>
         <div class="group" id="yaBox">
           <label class="field">API-ключ Yandex Cloud
             <input id="yaKey" type="password" autocomplete="off" placeholder="вставьте ключ">
@@ -337,7 +349,7 @@ details.more[open] summary{margin-bottom:10px}
         <p class="hint">Ключ хранится только на этом устройстве и в облако не попадает.</p>
       </div>
     </div>
-    <p class="hint" style="text-align:center">Версия сайта от 21 октября, №11</p>
+    <p class="hint" style="text-align:center">Версия сайта от 21 октября, №12</p>
   </div>
 </section>
 
@@ -362,11 +374,11 @@ details.more[open] summary{margin-bottom:10px}
   $("model").value = store.get("model","");
   function hasModel(){ return !!($("key").value.trim() && $("model").value.trim()); }
   function refreshSetup(){ $("setupCard").hidden=hasModel(); }
-  $("asr").value=store.get("asr","browser"); $("asrModel").value=store.get("asrModel",""); $("yaKey").value=store.get("yaKey","");
+  $("asr").value=store.get("asr","browser"); $("asrModel").value=store.get("asrModel",""); $("yaKey").value=store.get("yaKey",""); $("cfAccount").value=store.get("cfAccount",""); $("cfToken").value=store.get("cfToken","");
   if(!$("asr").value) $("asr").value="browser";
-  const showAsr=()=>{ const v=$("asr").value; $("asrBox").hidden=v!=="server"; $("yaBox").hidden=v!=="yandex"; $("rec").disabled=v==="browser"&&!(window.SpeechRecognition||window.webkitSpeechRecognition); };
+  const showAsr=()=>{ const v=$("asr").value; $("asrBox").hidden=v!=="server"; $("yaBox").hidden=v!=="yandex"; $("cfBox").hidden=v!=="cloudflare"; $("rec").disabled=v==="browser"&&!(window.SpeechRecognition||window.webkitSpeechRecognition); };
   showAsr();
-  ["asr","asrModel","yaKey"].forEach(id=>$(id).addEventListener("change",()=>{
+  ["asr","asrModel","yaKey","cfAccount","cfToken"].forEach(id=>$(id).addEventListener("change",()=>{
     store.set(id,$(id).value.trim()); showAsr();
     if(id==="asr"){ if(listening) stopListening(); releaseEngine(); srvRelease(); showNote("Способ распознавания изменён. Нажмите «Слушать».",4000); }
   }));
@@ -1235,7 +1247,7 @@ details.more[open] summary{margin-bottom:10px}
   const RATE=16000;
   const srv={stream:null,ctx:null,src:null,proc:null,queue:Promise.resolve(),busy:0,
     seg:[],segLen:0,pre:[],preLen:0,speech:false,silence:0,floor:0.004,carry:0,acc:0,accN:0};
-  const asrMode=()=>$("asr").value;                 // browser | yandex | server
+  const asrMode=()=>$("asr").value;                 // browser | cloudflare | yandex | server
   const asrServer=()=>asrMode()!=="browser";
   // Частые «галлюцинации» распознавания на тишине и шуме
   const HALLU=/^(продолжение следует|субтитры|спасибо за (просмотр|внимание)|подписывайтесь|редактор субтитров|thank you|you|\.+|…)[\s.!…]*$/i;
@@ -1319,6 +1331,21 @@ details.more[open] summary{margin-bottom:10px}
     if(!r.ok) throw sttError(r.status,data);
     return (data.result||"").trim();
   }
+  async function postCloudflare(pcm,prompt){
+    const acc=$("cfAccount").value.trim().toLowerCase(), tok=$("cfToken").value.trim();
+    if(!/^[0-9a-f]{32}$/.test(acc)) throw new Error("Account ID должен состоять из 32 символов (цифры и буквы a–f)");
+    if(!tok) throw new Error("не указан токен Cloudflare");
+    const q="?provider=cloudflare&lang="+encodeURIComponent($("lang").value.slice(0,2))+(prompt?"&prompt="+encodeURIComponent(prompt.slice(-300)):"");
+    let r; try{ r=await fetch(STT_URL+q,{method:"POST",headers:{authorization:"Bearer "+tok.replace(/^Bearer\s+/i,""),"x-cf-account":acc,"content-type":"audio/wav"},body:wavFrom(pcm)}); }
+    catch(e){ throw new Error("сервер не отвечает"); }
+    const data=await r.json().catch(()=>({}));
+    if(!r.ok){
+      if(r.status===401||r.status===403) throw new Error("токен или Account ID не подошли (нужен токен по шаблону «Workers AI»)");
+      if(r.status===429) throw new Error("закончился бесплатный дневной лимит Cloudflare, он обновится в 03:00 по Москве");
+      throw new Error((data.error&&data.error.message)||("код "+r.status));
+    }
+    return (data.result||"").trim();
+  }
   async function postWhisper(pcm,prompt){
     const c=cfg(), h=headers(c); delete h["content-type"]; // границу multipart браузер поставит сам
     const fd=new FormData();
@@ -1337,7 +1364,8 @@ details.more[open] summary{margin-bottom:10px}
     srv.busy++; interimEl.textContent="Распознаю…";
     try{
       const prompt=transcript.slice(-5).map(i=>i.text).join(" ").slice(-400);
-      const t=asrMode()==="yandex"?await postYandex(pcm):await postWhisper(pcm,prompt);
+      const m=asrMode();
+      const t=m==="yandex"?await postYandex(pcm):m==="cloudflare"?await postCloudflare(pcm,prompt):await postWhisper(pcm,prompt);
       if(t && !HALLU.test(t)) addLine(t);
     }catch(e){ showNote("Распознавание: "+e.message+". Проверьте настройки или включите встроенное.",7000); }
     finally{ srv.busy--; if(!srv.busy) interimEl.textContent=listening?"Слушаю…":""; }
@@ -1370,6 +1398,12 @@ details.more[open] summary{margin-bottom:10px}
   // Проверка: секунда тишины на распознавание
   const silent=()=>new Int16Array(RATE);
   function asrSay(id,t,k){ const o=$(id); o.hidden=false; o.textContent=t; o.dataset.kind=k||""; }
+  $("cfCheck").onclick=async()=>{
+    store.set("cfAccount",$("cfAccount").value.trim()); store.set("cfToken",$("cfToken").value.trim());
+    asrSay("cfMsg","Проверяю…","");
+    try{ await postCloudflare(silent(),""); asrSay("cfMsg","Работает: Cloudflare принял токен. Можно нажимать «Слушать».","ok"); }
+    catch(e){ asrSay("cfMsg","Не работает: "+e.message+".","err"); }
+  };
   $("yaCheck").onclick=async()=>{
     store.set("yaKey",$("yaKey").value.trim());
     if(!$("yaKey").value.trim()){ asrSay("yaMsg","Сначала вставьте API-ключ Яндекса.","err"); return; }
